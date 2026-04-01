@@ -72,7 +72,7 @@ const uint32_t TABLE_SIZE = 16646144;
 #define MAIN_DATAINTSLOW 1000 // [ms] interval between each log to FLASH - slowed rate after 5000 ms
 #define LAND_THRESHOLD -0.5//[m/s] Velocity Threshold to declare land
 #define LAND_GRACE  2000 // [ms] Time for measurements to be above threshold before Landing is declared
-const uint16_t MAIN_DEPLOY_THRESHOLD = 1500/3.281;
+const uint16_t MAIN_DEPLOY_THRESHOLD = 1500/3.281; // Feet to meters
 
 //--- LAND SETTINGS
 #define LAND_DATAINT 1000  //[ms] interval between each log to FLASH.
@@ -312,7 +312,7 @@ if (kx_detected) {
     emptySerialBuffer();
     usb.println("[MDE] Entered Debug Mode");
     debugMode();
-    while (true) {}
+    while (true) {} // TODO: Find a way to force end process instead of wait for manual power restart.
   }//if
 
   usb.println("Beginning PreFlight...");
@@ -352,7 +352,7 @@ void loop(){
   //Find Altitude from filtered Pressure
   // float alt = altitudeFind(P_filter,Po,To);
 
-  // TODO: FIX IN THE FUTURE
+  // TODO: FIX IN THE FUTURE (double check formula)
   // Override the inaccurate altitude system using raw pressure reading (im assuming its in pascals)
   float alt = (288.15d/0.0065d) * (1-pow(P_filter/101325.0f, 0.190284f));
 
@@ -721,7 +721,7 @@ void handleStatusFlash() {
     | ALTIMETER FUNC |    
 \*---/\---/\---/\---/\---*/
 float altitudeFind(float P, float Po, float To){
-  float alt = (To/LAPSE_RATE)*( pow(P/Po,0.19026627) - 1 );
+  float alt = (To/LAPSE_RATE)*( pow(P/Po,0.19026627) - 1 ); //TODO: Check if there is a better formula/way.
   return alt;
 }//altitudeFind()
 
