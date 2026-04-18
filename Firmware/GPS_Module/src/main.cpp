@@ -9,7 +9,6 @@
 static constexpr uint32_t kHeartbeatTxIntervalMs = AIM_HEARTBEAT_TX_INTERVAL_DEFAULT_MS;
 static constexpr uint32_t kTimeSyncTxIntervalMs = 250U;
 static constexpr uint32_t kGpsCoordTxIntervalMs = 1000U;
-static constexpr uint32_t kWatchdogTimeoutUs = 2000000U;
 static constexpr uint8_t kMaxRxFramesPerLoop = 8U;
 static constexpr uint8_t kGpsReadChunkBytes = 64U;
 static constexpr uint8_t kGpsI2cDataRegisterRequest = 0xFFU;
