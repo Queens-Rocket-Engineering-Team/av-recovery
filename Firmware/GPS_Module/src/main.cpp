@@ -1,20 +1,22 @@
 #include "node.h"
+#include "console.h"
 
 #include <IWatchdog.h>
 #include <logger.h>
 #include <SoftwareSerial.h>
+#include <SPI.h>
+#include <SerialFlash.h>
+#include <flash_table.h>
 #include <Wire.h>
 #include <TinyGPS++.h>
 
-static constexpr uint32_t kHeartbeatTxIntervalMs = AIM_HEARTBEAT_TX_INTERVAL_DEFAULT_MS;
 static constexpr uint32_t kTimeSyncTxIntervalMs = 250U;
 static constexpr uint32_t kGpsCoordTxIntervalMs = 1000U;
+static constexpr uint32_t kWatchdogTimeoutUs = 2000000U;
 static constexpr uint8_t kMaxRxFramesPerLoop = 8U;
 static constexpr uint8_t kGpsReadChunkBytes = 64U;
-static constexpr uint8_t kGpsI2cDataRegisterRequest = 0xFFU;
 static constexpr uint32_t kGpsNoDataWarnAfterMs = 5000U;
 static constexpr uint32_t kGpsI2cErrorLogIntervalMs = 5000U;
-static constexpr uint32_t kMillisecondsPerCentisecond = 10U;
 static constexpr int64_t kGpsDegreesToNanoScale = 1000000000LL;
 
 struct GpsState {
@@ -41,11 +43,44 @@ static AimCanDriver g_canHw(NODE_ORIGIN, NODE_CAN_BAUD, NODE_CAN_BUS);
 static AimNetwork g_aim(&g_canHw, NODE_ORIGIN);
 static SoftwareSerial g_serial(NODE_SERIAL_RX_PIN, NODE_SERIAL_TX_PIN);
 static Logger g_log(g_serial, NODE_ORIGIN, LogLevel::INFO);
+static uint32_t g_flashLastVals[NODE_FLASH_TABLE_COLS];
+static uint8_t g_flashIoBuffer[NODE_MCU_BUFFER_SIZE];
+static FlashTable g_flashTable(
+  &SerialFlash,
+  NODE_FLASH_TABLE_COLS,
+  NODE_FLASH_ORIGIN_REFRESH_INT,
+  NODE_FLASH_TABLE_SIZE,
+  NODE_FLASH_TABLE_NUM,
+  NODE_MCU_BUFFER_SIZE,
+  g_flashLastVals,
+  g_flashIoBuffer);
 static NodeSchedulerState g_schedulerState = {};
 static GpsState g_gpsState = {};
 
-void service_can_rx(void) {
+bool nodeGetGpsDebugSnapshot(GpsDebugSnapshot* out) {
+  if (out == nullptr) {
+    return false;
+  }
+
+  out->parserTimeValid = g_gpsState.parser.time.isValid();
+  out->parserLocationValid = g_gpsState.parser.location.isValid();
+  out->parserSatellitesValid = g_gpsState.parser.satellites.isValid();
+  out->hasValidTime = g_gpsState.hasValidTime;
+  out->hasValidLocation = g_gpsState.hasValidLocation;
+  out->timeOfDayMs = g_gpsState.timeOfDayMs;
+  out->longitudeNano = g_gpsState.longitudeNano;
+  out->latitudeNano = g_gpsState.latitudeNano;
+  out->satellites = g_gpsState.parser.satellites.value();
+  out->charsProcessed = g_gpsState.parser.charsProcessed();
+  out->sentencesWithFix = g_gpsState.parser.sentencesWithFix();
+  out->failedChecksum = g_gpsState.parser.failedChecksum();
+  out->passedChecksum = g_gpsState.parser.passedChecksum();
+  return true;
+}
+
+void service_can_rx(uint32_t networkNowMs) {
   // Handle incoming bus messages and custom packet branches here.
+  (void)networkNowMs;
   for (uint8_t i = 0U; i < kMaxRxFramesPerLoop; i++) {
     aimPkt pkt = {};
     if (!g_aim.readPkt(pkt)) {
@@ -74,8 +109,9 @@ int64_t rawDegreesToNano(const RawDegrees& raw) {
 }
 
 void poll_gps_i2c(void) {
+  // The GPS module exposes a single data register at 0xFF.
   Wire.beginTransmission(static_cast<uint8_t>(NODE_GPS_ADDR));
-  Wire.write(kGpsI2cDataRegisterRequest);
+  Wire.write(0xFFU);
   const uint8_t txStatus = Wire.endTransmission(false);
   if (txStatus != 0U) {
     const uint32_t nowMs = millis();
@@ -105,7 +141,7 @@ void update_network_time_from_gps(void) {
   }
 
   const uint32_t currentTimeOfDayCs = gpsTimeToCentiseconds(g_gpsState.parser.time);
-  g_gpsState.timeOfDayMs = currentTimeOfDayCs * kMillisecondsPerCentisecond;
+  g_gpsState.timeOfDayMs = currentTimeOfDayCs * 10U;
   if (!g_gpsState.hasValidTime) {
     g_gpsState.hasValidTime = true;
     LOG_INFO(
@@ -139,12 +175,12 @@ uint32_t get_network_now_ms(void) {
   return g_gpsState.timeOfDayMs;
 }
 
-void service_tx(uint32_t networkNowMs) {
+void service_can_tx(uint32_t networkNowMs) {
   // Add periodic transmit-side behavior in this service pattern.
   const uint32_t scheduleNowMs = millis();
 
   // TX SECTION 1: node heartbeat.
-  if ((scheduleNowMs - g_schedulerState.lastHeartbeatTxMs) >= kHeartbeatTxIntervalMs) {
+  if ((scheduleNowMs - g_schedulerState.lastHeartbeatTxMs) >= AIM_HEARTBEAT_TX_INTERVAL_DEFAULT_MS) {
     g_schedulerState.lastHeartbeatTxMs = scheduleNowMs;
     const uint32_t payload = static_cast<uint32_t>(g_schedulerState.value);
     const bool heartbeatSent = g_aim.sendPkt32(networkNowMs, payload, AIM_DEST_BROADCAST, AIM_TYP_HEARTBEAT);
@@ -197,45 +233,55 @@ void service_tx(uint32_t networkNowMs) {
 }
 
 void run_state_machine(uint32_t networkNowMs) {
-  if (g_schedulerState.value > FAULT) {
-    g_schedulerState.value = FAULT;
+  AIM_ASSERT(g_schedulerState.value <= FAULT);  // precondition: corrupted state -> reset
+
+  switch (g_schedulerState.value) {
+    case OPERATIONAL:
+#ifndef FLIGHT_BUILD
+      if (consoleCheckEntry() == CONSOLE_ACTION_ENTER) {
+        g_schedulerState.value = DEBUG_CONSOLE;
+      }
+#endif
+      break;
+
+#ifndef FLIGHT_BUILD
+    case DEBUG_CONSOLE: {
+      const ConsoleAction act = consoleService(static_cast<uint8_t>(g_schedulerState.value), networkNowMs);
+      if (act == CONSOLE_ACTION_EXIT) {
+        g_schedulerState.value = OPERATIONAL;
+      } else if (act == CONSOLE_ACTION_FLASH_DUMP) {
+        g_schedulerState.value = FLASH_DUMP;
+      }
+      break;
+    }
+
+    case FLASH_DUMP:
+      if (consoleServiceFlashDump() == CONSOLE_ACTION_DUMP_DONE) {
+        g_schedulerState.value = DEBUG_CONSOLE;
+      }
+      break;
+#endif
+
+    case SAFE_MODE:
+    case LOW_POWER:
+    case FAULT:
+      break;
+
+    default:
+      AIM_ASSERT(false);
+      break;
   }
 
-  AIM_ASSERT(g_schedulerState.value <= FAULT);
-  if (g_schedulerState.value == INIT) {
-    board_init();
-    const uint32_t scheduleNowMs = millis();
-    g_schedulerState.lastHeartbeatTxMs = scheduleNowMs;
-    g_schedulerState.lastTimeSyncTxMs = scheduleNowMs;
-    g_schedulerState.lastGpsCoordTxMs = scheduleNowMs;
-    g_schedulerState.value = OPERATIONAL;
-    LOG_INFO("State transition INIT -> OPERATIONAL");
-    return;
-  }
-
-  board_update(g_schedulerState.value);
-  service_tx(networkNowMs);
+  board_update();
+  service_can_tx(networkNowMs);
 }
 
-void board_init(void) {
-  // BOARD EXTENSION POINT: add one-time board setup here.
-  AIM_ASSERT(NODE_ORIGIN <= AIM_ORG_ADDR_MAX);
-
-  Wire.setSCL(NODE_GPS_SCL_PIN);
-  Wire.setSDA(NODE_GPS_SDA_PIN);
-  Wire.begin();
-  LOG_INFO("GPS I2C ready addr=0x%02X", static_cast<unsigned>(NODE_GPS_ADDR));
-}
-
-void board_update(NodeState state) {
+void board_update(void) {
   // BOARD EXTENSION POINT: add recurring board logic here.
-  AIM_ASSERT(state <= FAULT);
 
   poll_gps_i2c();
   update_network_time_from_gps();
   update_network_coords_from_gps();
-
-  (void)state;
 }
 
 void setup(void) {
@@ -246,15 +292,41 @@ void setup(void) {
   IWatchdog.begin(kWatchdogTimeoutUs);
   LOG_INFO("Watchdog ready");
   g_aim.begin();
-  g_schedulerState.value = INIT;
+#ifndef FLIGHT_BUILD
+  consoleInit(g_serial, g_aim, g_log, g_flashTable);
+#endif
+
+  SPI.setSCLK(NODE_FLASH_SCK_PIN);
+  SPI.setMISO(NODE_FLASH_MISO_PIN);
+  SPI.setMOSI(NODE_FLASH_MOSI_PIN);
+  SPI.begin();
+  if (SerialFlash.begin(NODE_FLASH_CS_PIN)) {
+    g_flashTable.init(&g_serial);
+  }
+  if (g_flashTable.isReady()) {
+    LOG_INFO("Flash ready");
+  } else {
+    LOG_WARN("Flash init failed");
+  }
+
+  Wire.setSCL(NODE_GPS_SCL_PIN);
+  Wire.setSDA(NODE_GPS_SDA_PIN);
+  Wire.begin();
+  LOG_INFO("GPS I2C ready addr=0x%02X", static_cast<unsigned>(NODE_GPS_ADDR));
+#ifndef FLIGHT_BUILD
+  g_serial.println("Console ready. d=enter debug");
+#endif
+  g_schedulerState.lastHeartbeatTxMs = millis();
+  g_schedulerState.lastTimeSyncTxMs = millis();
+  g_schedulerState.lastGpsCoordTxMs = millis();
+  g_schedulerState.value = OPERATIONAL;
 }
 
 void loop(void) {
-  AIM_ASSERT(g_schedulerState.value <= FAULT);
   const uint32_t networkNowMs = get_network_now_ms();
 
   // Main scheduler order: RX, state machine, watchdog.
-  service_can_rx();
+  service_can_rx(networkNowMs);
   run_state_machine(networkNowMs);
 
   IWatchdog.reload();
