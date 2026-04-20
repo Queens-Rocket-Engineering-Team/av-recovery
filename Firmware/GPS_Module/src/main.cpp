@@ -78,7 +78,7 @@ bool nodeGetGpsDebugSnapshot(GpsDebugSnapshot* out) {
   return true;
 }
 
-void service_can_rx(uint32_t networkNowMs) {
+void serviceCanRx(uint32_t networkNowMs) {
   // Handle incoming bus messages and custom packet branches here.
   (void)networkNowMs;
   for (uint8_t i = 0U; i < kMaxRxFramesPerLoop; i++) {
@@ -108,80 +108,12 @@ int64_t rawDegreesToNano(const RawDegrees& raw) {
   return nano;
 }
 
-void poll_gps_i2c(void) {
-  // The GPS module exposes a single data register at 0xFF.
-  Wire.beginTransmission(static_cast<uint8_t>(NODE_GPS_ADDR));
-  Wire.write(0xFFU);
-  const uint8_t txStatus = Wire.endTransmission(false);
-  if (txStatus != 0U) {
-    const uint32_t nowMs = millis();
-    if ((nowMs - g_gpsState.lastI2cErrorLogMs) >= kGpsI2cErrorLogIntervalMs) {
-      LOG_WARN("GPS I2C request failed status=%u", static_cast<unsigned>(txStatus));
-      g_gpsState.lastI2cErrorLogMs = nowMs;
-    }
-  } else {
-    (void)Wire.requestFrom(static_cast<uint8_t>(NODE_GPS_ADDR), kGpsReadChunkBytes);
-    for (uint8_t i = 0U; (i < kGpsReadChunkBytes) && (Wire.available() > 0); i++) {
-      (void)g_gpsState.parser.encode(static_cast<char>(Wire.read()));
-    }
-  }
-
-  if (!g_gpsState.loggedNoDataWarning &&
-      (millis() > kGpsNoDataWarnAfterMs) &&
-      (g_gpsState.parser.charsProcessed() < 10UL)) {
-    LOG_WARN("No GPS NMEA data detected yet");
-    g_gpsState.loggedNoDataWarning = true;
-  }
-}
-
-void update_network_time_from_gps(void) {
-  if (!g_gpsState.parser.time.isValid()) {
-    g_gpsState.hasValidTime = false;
-    return;
-  }
-
-  const uint32_t currentTimeOfDayCs = gpsTimeToCentiseconds(g_gpsState.parser.time);
-  g_gpsState.timeOfDayMs = currentTimeOfDayCs * 10U;
-  if (!g_gpsState.hasValidTime) {
-    g_gpsState.hasValidTime = true;
-    LOG_INFO(
-        "GPS time lock acquired %02u:%02u:%02u.%02u",
-        static_cast<unsigned>(g_gpsState.parser.time.hour()),
-        static_cast<unsigned>(g_gpsState.parser.time.minute()),
-        static_cast<unsigned>(g_gpsState.parser.time.second()),
-        static_cast<unsigned>(g_gpsState.parser.time.centisecond()));
-  }
-}
-
-void update_network_coords_from_gps(void) {
-  if (!g_gpsState.parser.location.isValid()) {
-    g_gpsState.hasValidLocation = false;
-    return;
-  }
-
-  const RawDegrees rawLng = g_gpsState.parser.location.rawLng();
-  const RawDegrees rawLat = g_gpsState.parser.location.rawLat();
-
-  g_gpsState.longitudeNano = rawDegreesToNano(rawLng);
-  g_gpsState.latitudeNano = rawDegreesToNano(rawLat);
-  g_gpsState.hasValidLocation = true;
-}
-
-uint32_t get_network_now_ms(void) {
-  if (!g_gpsState.hasValidTime) {
-    return 0U;
-  }
-
-  return g_gpsState.timeOfDayMs;
-}
-
-void service_can_tx(uint32_t networkNowMs) {
+void serviceCanTx(uint32_t schedulerNowMs, uint32_t networkNowMs) {
   // Add periodic transmit-side behavior in this service pattern.
-  const uint32_t scheduleNowMs = millis();
 
   // TX SECTION 1: node heartbeat.
-  if ((scheduleNowMs - g_schedulerState.lastHeartbeatTxMs) >= AIM_HEARTBEAT_TX_INTERVAL_DEFAULT_MS) {
-    g_schedulerState.lastHeartbeatTxMs = scheduleNowMs;
+  if ((schedulerNowMs - g_schedulerState.lastHeartbeatTxMs) >= AIM_HEARTBEAT_TX_INTERVAL_DEFAULT_MS) {
+    g_schedulerState.lastHeartbeatTxMs = schedulerNowMs;
     const uint32_t payload = static_cast<uint32_t>(g_schedulerState.value);
     const bool heartbeatSent = g_aim.sendPkt32(networkNowMs, payload, AIM_DEST_BROADCAST, AIM_TYP_HEARTBEAT);
     if (!heartbeatSent) {
@@ -192,8 +124,8 @@ void service_can_tx(uint32_t networkNowMs) {
   }
 
   // TX SECTION 2: strict GPS time-of-day sync in 64-bit payload.
-  if ((scheduleNowMs - g_schedulerState.lastTimeSyncTxMs) >= kTimeSyncTxIntervalMs) {
-    g_schedulerState.lastTimeSyncTxMs = scheduleNowMs;
+  if ((schedulerNowMs - g_schedulerState.lastTimeSyncTxMs) >= kTimeSyncTxIntervalMs) {
+    g_schedulerState.lastTimeSyncTxMs = schedulerNowMs;
 
     if (!g_gpsState.hasValidTime) {
       if (!g_gpsState.loggedNoGpsTimeWarning) {
@@ -210,8 +142,8 @@ void service_can_tx(uint32_t networkNowMs) {
   }
 
   // TX SECTION 3: COMMs GPS coordinates, long then lat, each as signed nano-degrees in 64-bit payload.
-  if ((scheduleNowMs - g_schedulerState.lastGpsCoordTxMs) >= kGpsCoordTxIntervalMs) {
-    g_schedulerState.lastGpsCoordTxMs = scheduleNowMs;
+  if ((schedulerNowMs - g_schedulerState.lastGpsCoordTxMs) >= kGpsCoordTxIntervalMs) {
+    g_schedulerState.lastGpsCoordTxMs = schedulerNowMs;
 
     if (!g_gpsState.hasValidLocation) {
       if (!g_gpsState.loggedNoGpsLocationWarning) {
@@ -232,7 +164,7 @@ void service_can_tx(uint32_t networkNowMs) {
   }
 }
 
-void run_state_machine(uint32_t networkNowMs) {
+void runStateMachine(uint32_t schedulerNowMs, uint32_t networkNowMs) {
   AIM_ASSERT(g_schedulerState.value <= FAULT);  // precondition: corrupted state -> reset
 
   switch (g_schedulerState.value) {
@@ -246,20 +178,69 @@ void run_state_machine(uint32_t networkNowMs) {
 
 #ifndef FLIGHT_BUILD
     case DEBUG_CONSOLE: {
-      const ConsoleAction act = consoleService(static_cast<uint8_t>(g_schedulerState.value), networkNowMs);
+      const ConsoleAction act = consoleService(
+          static_cast<uint8_t>(g_schedulerState.value), networkNowMs);
       if (act == CONSOLE_ACTION_EXIT) {
         g_schedulerState.value = OPERATIONAL;
+      } else if (act == CONSOLE_ACTION_FLASH_INFO) {
+        g_flashTable.commandInfo(&g_serial);
       } else if (act == CONSOLE_ACTION_FLASH_DUMP) {
-        g_schedulerState.value = FLASH_DUMP;
+        if (g_flashTable.commandDump(&g_serial, 512U, nullptr, nullptr)) {
+          g_schedulerState.value = FLASH_DUMP;
+          g_serial.print("state=");
+          g_serial.println(static_cast<unsigned>(FLASH_DUMP));
+        }
+      } else if (act == CONSOLE_ACTION_FLASH_ERASE) {
+        g_flashTable.commandErase(&g_serial);
+        g_schedulerState.value = FLASH_ERASE;
       }
       break;
     }
 
-    case FLASH_DUMP:
-      if (consoleServiceFlashDump() == CONSOLE_ACTION_DUMP_DONE) {
+    case FLASH_DUMP: {
+      if (g_serial.available() > 0) {
+        const int c = g_serial.read();
+        if (c == 'q' || c == 'Q') {
+          g_flashTable.cancelDump();
+          g_serial.println("flash dump canceled");
+          g_schedulerState.value = DEBUG_CONSOLE;
+          g_serial.print("state=");
+          g_serial.println(static_cast<unsigned>(DEBUG_CONSOLE));
+          consoleResume();
+          break;
+        }
+      }
+
+      const FlashTableServiceResult r = g_flashTable.serviceDump(&g_serial, 16U);
+      if (r != FLASHTABLE_SERVICE_ACTIVE) {
+        static const char* const kDumpMsg[] = {
+          "flash dump idle",
+          nullptr,
+          "flash dump done",
+          "flash dump aborted",
+          "flash dump error"
+        };
+        const uint8_t idx = static_cast<uint8_t>(r);
+        if (idx < 5U && kDumpMsg[idx] != nullptr) {
+          g_serial.println(kDumpMsg[idx]);
+        }
         g_schedulerState.value = DEBUG_CONSOLE;
+        g_serial.print("state=");
+        g_serial.println(static_cast<unsigned>(DEBUG_CONSOLE));
+        consoleResume();
       }
       break;
+    }
+
+    case FLASH_ERASE: {
+      const FlashTableServiceResult r = g_flashTable.serviceErase();
+      if (r != FLASHTABLE_SERVICE_ACTIVE) {
+        g_serial.println(r == FLASHTABLE_SERVICE_DONE ? "flash erase done" : "flash erase error");
+        g_schedulerState.value = DEBUG_CONSOLE;
+        consoleResume();
+      }
+      break;
+    }
 #endif
 
     case SAFE_MODE:
@@ -272,16 +253,66 @@ void run_state_machine(uint32_t networkNowMs) {
       break;
   }
 
-  board_update();
-  service_can_tx(networkNowMs);
+  nodeUpdate(schedulerNowMs);
+  serviceCanTx(schedulerNowMs, networkNowMs);
 }
 
-void board_update(void) {
-  // BOARD EXTENSION POINT: add recurring board logic here.
+void nodeUpdate(uint32_t schedulerNowMs) {
+  // NODE EXTENSION POINT: add recurring node logic here.
 
-  poll_gps_i2c();
-  update_network_time_from_gps();
-  update_network_coords_from_gps();
+  // Pull GPS data over I2C
+  // The GPS module exposes a single data register at 0xFF.
+  Wire.beginTransmission(static_cast<uint8_t>(NODE_GPS_ADDR));
+  Wire.write(0xFFU);
+  const uint8_t txStatus = Wire.endTransmission(false);
+  if (txStatus != 0U) {
+    if ((schedulerNowMs - g_gpsState.lastI2cErrorLogMs) >= kGpsI2cErrorLogIntervalMs) {
+      LOG_WARN("GPS I2C request failed status=%u", static_cast<unsigned>(txStatus));
+      g_gpsState.lastI2cErrorLogMs = schedulerNowMs;
+    }
+  } else {
+    (void)Wire.requestFrom(static_cast<uint8_t>(NODE_GPS_ADDR), kGpsReadChunkBytes);
+    for (uint8_t i = 0U; (i < kGpsReadChunkBytes) && (Wire.available() > 0); i++) {
+      (void)g_gpsState.parser.encode(static_cast<char>(Wire.read()));
+    }
+  }
+
+  if (!g_gpsState.loggedNoDataWarning &&
+      (schedulerNowMs > kGpsNoDataWarnAfterMs) &&
+      (g_gpsState.parser.charsProcessed() < 10UL)) {
+    LOG_WARN("No GPS NMEA data detected yet");
+    g_gpsState.loggedNoDataWarning = true;
+  }
+
+  // Update network time from GPS
+  if (!g_gpsState.parser.time.isValid()) {
+    g_gpsState.hasValidTime = false;
+  } else {
+    const uint32_t currentTimeOfDayCs = gpsTimeToCentiseconds(g_gpsState.parser.time);
+    g_gpsState.timeOfDayMs = currentTimeOfDayCs * 10U;
+    if (!g_gpsState.hasValidTime) {
+      g_gpsState.hasValidTime = true;
+      LOG_INFO(
+          "GPS time lock acquired %02u:%02u:%02u.%02u",
+          static_cast<unsigned>(g_gpsState.parser.time.hour()),
+          static_cast<unsigned>(g_gpsState.parser.time.minute()),
+          static_cast<unsigned>(g_gpsState.parser.time.second()),
+          static_cast<unsigned>(g_gpsState.parser.time.centisecond()));
+    }
+  }
+
+  // Update GPS coordinates from GPS
+  if (!g_gpsState.parser.location.isValid()) {
+    g_gpsState.hasValidLocation = false;
+  } else {
+    const RawDegrees rawLng = g_gpsState.parser.location.rawLng();
+    const RawDegrees rawLat = g_gpsState.parser.location.rawLat();
+
+    g_gpsState.longitudeNano = rawDegreesToNano(rawLng);
+    g_gpsState.latitudeNano = rawDegreesToNano(rawLat);
+    g_gpsState.hasValidLocation = true;
+  }
+
 }
 
 void setup(void) {
@@ -291,11 +322,14 @@ void setup(void) {
   LOG_INFO("Boot node origin=%u", static_cast<unsigned>(NODE_ORIGIN));
   IWatchdog.begin(kWatchdogTimeoutUs);
   LOG_INFO("Watchdog ready");
+
   g_aim.begin();
+
 #ifndef FLIGHT_BUILD
-  consoleInit(g_serial, g_aim, g_log, g_flashTable);
+  consoleInit(g_serial, g_aim, g_log);
 #endif
 
+  // NODE EXTENSION POINT: add one-time node setup here.
   SPI.setSCLK(NODE_FLASH_SCK_PIN);
   SPI.setMISO(NODE_FLASH_MISO_PIN);
   SPI.setMOSI(NODE_FLASH_MOSI_PIN);
@@ -323,11 +357,15 @@ void setup(void) {
 }
 
 void loop(void) {
-  const uint32_t networkNowMs = get_network_now_ms();
+  const uint32_t schedulerNowMs = millis();
+  uint32_t networkNowMs = schedulerNowMs;
+  if (g_gpsState.hasValidTime) {
+    networkNowMs = g_gpsState.timeOfDayMs;
+  }
 
   // Main scheduler order: RX, state machine, watchdog.
-  service_can_rx(networkNowMs);
-  run_state_machine(networkNowMs);
+  serviceCanRx(networkNowMs);
+  runStateMachine(schedulerNowMs, networkNowMs);
 
   IWatchdog.reload();
 }

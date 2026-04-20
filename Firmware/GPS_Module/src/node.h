@@ -8,7 +8,7 @@
 #include <aim_network.h>
 #include <aim_safety.h>
 
-// Board-level identity and interface configuration lives in this file.
+// Node-level identity and interface configuration lives in this file.
 #define NODE_ORIGIN AIM_ORG_GPS
 #define NODE_NAME "GPS_MODULE"
 
@@ -47,9 +47,10 @@ enum NodeState : uint8_t {
   OPERATIONAL = 1U,
   DEBUG_CONSOLE = 2U,
   FLASH_DUMP = 3U,
-  SAFE_MODE = 4U,
-  LOW_POWER = 5U,
-  FAULT = 6U
+  FLASH_ERASE = 4U,
+  SAFE_MODE = 5U,
+  LOW_POWER = 6U,
+  FAULT = 7U
 };
 
 struct GpsDebugSnapshot {
@@ -70,7 +71,7 @@ struct GpsDebugSnapshot {
 
 bool nodeGetGpsDebugSnapshot(GpsDebugSnapshot* out);
 
-// Add board-specific periodic behavior in board_update().
-void board_update(void);
+// Add node-specific periodic behavior in nodeUpdate().
+void nodeUpdate(uint32_t schedulerNowMs);
 
 #endif  // NODE_H
