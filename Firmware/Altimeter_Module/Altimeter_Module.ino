@@ -1,8 +1,8 @@
 /*
 QRET SRAD Avionics module - AIM
-Authors: Brent Naumann, Tristan Alderson, Kennan Bays, Caelan Donovan, Ethan Toste
+Authors: Brent Naumann, Tristan Alderson, Kennan Bays, Caelan Donovan, Ethan Toste, Andrew Gault
 Env: Arduino 1.8.10, STM32duino 2.7.1
-Updated: Aug.17.2025
+Updated: April.21.2026
 Purpose: QRET SRAD Avionics module - AIM Altimeter Module Firmware V 2.0 (STINGER)
 
 Sensors used:
@@ -59,7 +59,7 @@ const uint32_t TABLE_SIZE = 16646144;
 #define PRE_DATAINT 35  //[ms] interval bewteen each log to FLASH.
 
 //--- LAUNCH SETTINGS
-#define LAUNCH_THRESHOLD  25  // [m/s]-mpu ; [g]-qma. Acceleration threshold to declare launch
+#define LAUNCH_THRESHOLD  100  // [m]. Altitude difference from baseline to current threshold to declare launch. Must be greater than this for three cycles.
 #define LAUNCH_GRACE      75 // [ms] Time for measurements to be above threshold before Launch declared
 
 //--- ASCENT SETTINGS
@@ -100,6 +100,8 @@ sensors_event_t a, g, temp;  // for mpu6050
 
 float Po;
 float To;
+
+float strike; // If strike >= 3 launch is detected.
 
 //state machine
 uint8_t STATE = 0;  //State flag for state machine
@@ -352,9 +354,7 @@ void loop(){
   //Find Altitude from filtered Pressure
   // float alt = altitudeFind(P_filter,Po,To);
 
-  // TODO: FIX IN THE FUTURE
-  // Override the inaccurate altitude system using raw pressure reading (im assuming its in pascals)
-  float alt = (288.15d/0.0065d) * (1-pow(P_filter/101325.0f, 0.190284f));
+  float alt = altitudeFind(P_filter, Po, To);
 
   //read gyro
   mpu6050.getEvent(&a, &g, &temp);
@@ -390,7 +390,8 @@ void loop(){
         lastLog = millis();
       }//if
       //Perform Launch Checks
-      if(detectLaunch()){
+      
+      if(detectLaunch(alt)){
           STATE = 1;  
           digitalWrite(STATUS_LED_PIN,LOW);
       }//if
@@ -525,8 +526,8 @@ void logDataToFlash( float pressure, float pressure_filter, float temp,sensors_e
 /*---\/---\/---\/---\/---*\
      |  EVENT CHECKS |    
 \*---/\---/\---/\---/\---*/
-bool detectLaunch(){
-  if (a.acceleration.z > LAUNCH_THRESHOLD){ //check if sensor reading is higher than 
+bool detectLaunch(float alt){
+  if (strike >= 3) {
     
     if (!potentialLaunch) {
       //if first measurement, begin launch countdown
@@ -541,6 +542,12 @@ bool detectLaunch(){
     }//if
     
   } else {
+    // 3 strike system. If detects altitude over the threshold three consecutive times, then launch detected:
+    if (alt > LAUNCH_THRESHOLD) {
+      strike += 1;
+    } else {
+      strike = 0;
+    }
     potentialLaunch = 0;
   }//if
   return false;
