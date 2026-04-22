@@ -10,7 +10,9 @@
 enum ConsoleMenu : uint8_t {
   CONSOLE_MENU_ROOT      = 0U,
   CONSOLE_MENU_LOG_MASK  = 1U,
-  CONSOLE_MENU_FLASH     = 2U
+  CONSOLE_MENU_FLASH     = 2U,
+  CONSOLE_MENU_GPS       = 3U,
+  CONSOLE_MENU_FLASH_ERASE_CONFIRM = 4U
 };
 
 static Stream* s_serial = nullptr;
@@ -49,7 +51,7 @@ static void showMenu(ConsoleMenu menu) {
   switch (menu) {
     case CONSOLE_MENU_ROOT:
       s_serial->println("DEBUG: q exit | b back");
-      s_serial->println("1 status | 2 log | 3 flash");
+      s_serial->println("1 status | 2 log | 3 flash | 4 gps");
       break;
     case CONSOLE_MENU_LOG_MASK:
       s_serial->println("LOG mask: q exit | b back");
@@ -60,12 +62,74 @@ static void showMenu(ConsoleMenu menu) {
       s_serial->println("FLASH: q exit | b back");
       s_serial->println("1 info | 2 dump | 3 erase");
       break;
+    case CONSOLE_MENU_GPS:
+      s_serial->println("GPS: q exit | b back");
+      s_serial->println("1 snapshot | 2 parser stats");
+      break;
+    case CONSOLE_MENU_FLASH_ERASE_CONFIRM:
+      s_serial->println("FLASH ERASE: q exit | b back");
+      s_serial->println("1 confirm");
+      break;
     default:
       s_menu = CONSOLE_MENU_ROOT;
       s_serial->println("DEBUG: q exit | b back");
       s_serial->println("1 status | 2 log | 3 flash");
       break;
   }
+}
+
+static void printGpsSnapshot(void) {
+  AIM_ASSERT(s_serial != nullptr);
+
+  GpsDebugSnapshot gps = {};
+  if (!nodeGetGpsDebugSnapshot(&gps)) {
+    s_serial->println("gps snapshot unavailable");
+    return;
+  }
+
+  s_serial->print("gps timeValid(parser/state)=");
+  s_serial->print(static_cast<unsigned>(gps.parserTimeValid ? 1U : 0U));
+  s_serial->print("/");
+  s_serial->println(static_cast<unsigned>(gps.hasValidTime ? 1U : 0U));
+
+  s_serial->print("gps locValid(parser/state)=");
+  s_serial->print(static_cast<unsigned>(gps.parserLocationValid ? 1U : 0U));
+  s_serial->print("/");
+  s_serial->println(static_cast<unsigned>(gps.hasValidLocation ? 1U : 0U));
+
+  s_serial->print("gps sats(valid/count)=");
+  s_serial->print(static_cast<unsigned>(gps.parserSatellitesValid ? 1U : 0U));
+  s_serial->print("/");
+  s_serial->println(static_cast<unsigned long>(gps.satellites));
+
+  s_serial->print("timeOfDayMs=");
+  s_serial->println(static_cast<unsigned long>(gps.timeOfDayMs));
+
+  s_serial->print("lonNano=");
+  s_serial->println(static_cast<long long>(gps.longitudeNano));
+  s_serial->print("latNano=");
+  s_serial->println(static_cast<long long>(gps.latitudeNano));
+}
+
+static void printGpsParserStats(void) {
+  AIM_ASSERT(s_serial != nullptr);
+
+  GpsDebugSnapshot gps = {};
+  if (!nodeGetGpsDebugSnapshot(&gps)) {
+    s_serial->println("gps parser stats unavailable");
+    return;
+  }
+
+  s_serial->print("chars=");
+  s_serial->println(static_cast<unsigned long>(gps.charsProcessed));
+  s_serial->print("sentencesWithFix=");
+  s_serial->println(static_cast<unsigned long>(gps.sentencesWithFix));
+  s_serial->print("checksum pass/fail=");
+  s_serial->print(static_cast<unsigned long>(gps.passedChecksum));
+  s_serial->print("/");
+  s_serial->println(static_cast<unsigned long>(gps.failedChecksum));
+  s_serial->print("satellites=");
+  s_serial->println(static_cast<unsigned long>(gps.satellites));
 }
 
 static void printStatus(uint8_t currentState, uint32_t networkNowMs) {
@@ -142,11 +206,11 @@ ConsoleAction consoleService(uint8_t currentState, uint32_t networkNowMs) {
 
   switch (s_menu) {
     case CONSOLE_MENU_ROOT:
-      if (c == 'b') {
-        showMenu(CONSOLE_MENU_ROOT);
-        break;
-      }
+
       switch (c) {
+        case 'b':
+          showMenu(CONSOLE_MENU_ROOT);
+          break;
         case '1':
           printStatus(currentState, networkNowMs);
           break;
@@ -156,17 +220,21 @@ ConsoleAction consoleService(uint8_t currentState, uint32_t networkNowMs) {
         case '3':
           showMenu(CONSOLE_MENU_FLASH);
           break;
+        case '4':
+          showMenu(CONSOLE_MENU_GPS);
+          break;
         default:
+          showMenu(CONSOLE_MENU_ROOT);
           break;
       }
       break;
 
     case CONSOLE_MENU_LOG_MASK:
-      if (c == 'b') {
-        showMenu(CONSOLE_MENU_ROOT);
-        break;
-      }
+
       switch (c) {
+        case 'b':
+          showMenu(CONSOLE_MENU_ROOT);
+          break;
         case '1':
           setLogMask(static_cast<uint8_t>(LogLevel::DEBUG), "DEBUG only");
           break;
@@ -193,23 +261,58 @@ ConsoleAction consoleService(uint8_t currentState, uint32_t networkNowMs) {
                      "INFO/WARN/ERROR");
           break;
         default:
+          showMenu(CONSOLE_MENU_LOG_MASK);
           break;
       }
       break;
 
     case CONSOLE_MENU_FLASH:
-      if (c == 'b') {
-        showMenu(CONSOLE_MENU_ROOT);
-        break;
-      }
+
       switch (c) {
+        case 'b':
+          showMenu(CONSOLE_MENU_ROOT);
+          break;
         case '1':
           return CONSOLE_ACTION_FLASH_INFO;
         case '2':
           return CONSOLE_ACTION_FLASH_DUMP;
         case '3':
+          showMenu(CONSOLE_MENU_FLASH_ERASE_CONFIRM);
+          break;
+        default:
+          showMenu(CONSOLE_MENU_FLASH);
+          break;
+      }
+      break;
+
+      case CONSOLE_MENU_FLASH_ERASE_CONFIRM: // submenu of MENU_FLASH
+      switch (c) {
+        case 'b':
+          showMenu(CONSOLE_MENU_FLASH);
+          break;
+        case '1':
           return CONSOLE_ACTION_FLASH_ERASE;
         default:
+          showMenu(CONSOLE_MENU_FLASH_ERASE_CONFIRM);
+          break;
+      }
+      break;
+
+      case CONSOLE_MENU_GPS:
+
+      switch (c) {
+        case 'b':
+          showMenu(CONSOLE_MENU_ROOT);
+          break;
+        case '1':
+          printGpsSnapshot();
+          break;
+        case '2':
+          printGpsParserStats();
+          break;
+          return CONSOLE_ACTION_FLASH_ERASE;
+        default:
+          showMenu(CONSOLE_MENU_GPS);
           break;
       }
       break;
