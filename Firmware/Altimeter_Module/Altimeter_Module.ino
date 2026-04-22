@@ -346,7 +346,7 @@ void loop(){
 
   //Get variables for pressure and temperature
   float P = ms5611.getPressurePascal();  // Pascals
-  float T = ms5611.getTemperature(); // Celcius
+  float T = ms5611.getTemperature() + 273.15; // Kelvin
 
   //Kalman Filtering on pressure
   float P_filter = kalmanFilter.updateEstimate(P);
@@ -369,7 +369,7 @@ void loop(){
     //sendCANtemp(T);
     usb.print("Pres(Pa): ");
     usb.print(P_filter, 2);
-    usb.print(", Temp(C): ");
+    usb.print(", Temp(K): ");
     usb.print(T);
     usb.print(", Alt(m): ");
     usb.println(alt);
@@ -659,7 +659,7 @@ void debugMode() {
       // LOG DATA
       //Get variables for pressure and temperature
       float P = ms5611.getPressurePascal(); //pascals
-      float T = ms5611.getTemperature(); //celcius
+      float T = ms5611.getTemperature() + 273.15; // Kelvin
       float P_filter = kalmanFilter.updateEstimate(P);
       mpu6050.getEvent(&a, &g, &temp);
       logDataToFlash(P,P_filter,T,&a,&g,&kxData);
@@ -680,7 +680,7 @@ void debugMode() {
         ms5611.read();
         usb.println("[MDE] --MS5611--");
         usb.print(F("[MDE] Temperature (1.00C): "));
-        usb.println(ms5611.getTemperature());
+        usb.println(ms5611.getTemperature() + 273.15);
         usb.print(F("[MDE] Pressure (Pa): "));
         usb.println(ms5611.getPressurePascal());
 
@@ -740,7 +740,7 @@ float altimeterBaseTemp(int sample){
 
   for (int i=0 ; i<sample ; i++){
     ms5611.read();
-    float Ti = ms5611.getTemperature(); //celcius
+    float Ti = ms5611.getTemperature() + 273.15; // Kelvin
     sum +=Ti;
   }//for
   float To = sum/sample;
