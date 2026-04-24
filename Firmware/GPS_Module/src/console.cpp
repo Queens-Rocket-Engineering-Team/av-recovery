@@ -13,6 +13,7 @@ enum ConsoleMenu : uint8_t {
   CONSOLE_MENU_FLASH     = 2U,
   CONSOLE_MENU_GPS       = 3U,
   CONSOLE_MENU_FLASH_ERASE_CONFIRM = 4U
+  // add more menus as needed
 };
 
 static Stream* s_serial = nullptr;
@@ -104,6 +105,9 @@ static void printGpsSnapshot(void) {
 
   s_serial->print("timeOfDayMs=");
   s_serial->println(static_cast<unsigned long>(gps.timeOfDayMs));
+
+  s_serial->print("readableTime=");
+  s_serial->println(gps.readableTimeStr);
 
   s_serial->print("lonNano=");
   s_serial->println(static_cast<long long>(gps.longitudeNano));
@@ -205,8 +209,8 @@ ConsoleAction consoleService(uint8_t currentState, uint32_t networkNowMs) {
   }
 
   switch (s_menu) {
+    
     case CONSOLE_MENU_ROOT:
-
       switch (c) {
         case 'b':
           showMenu(CONSOLE_MENU_ROOT);
@@ -230,7 +234,6 @@ ConsoleAction consoleService(uint8_t currentState, uint32_t networkNowMs) {
       break;
 
     case CONSOLE_MENU_LOG_MASK:
-
       switch (c) {
         case 'b':
           showMenu(CONSOLE_MENU_ROOT);
@@ -267,7 +270,6 @@ ConsoleAction consoleService(uint8_t currentState, uint32_t networkNowMs) {
       break;
 
     case CONSOLE_MENU_FLASH:
-
       switch (c) {
         case 'b':
           showMenu(CONSOLE_MENU_ROOT);
@@ -299,7 +301,6 @@ ConsoleAction consoleService(uint8_t currentState, uint32_t networkNowMs) {
       break;
 
       case CONSOLE_MENU_GPS:
-
       switch (c) {
         case 'b':
           showMenu(CONSOLE_MENU_ROOT);

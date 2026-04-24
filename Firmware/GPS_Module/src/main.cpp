@@ -68,6 +68,11 @@ bool nodeGetGpsDebugSnapshot(GpsDebugSnapshot* out) {
   out->hasValidTime = g_gpsState.hasValidTime;
   out->hasValidLocation = g_gpsState.hasValidLocation;
   out->timeOfDayMs = g_gpsState.timeOfDayMs;
+  snprintf(out->readableTimeStr, sizeof(out->readableTimeStr), "%02u:%02u:%02u.%02u",
+          static_cast<unsigned>(g_gpsState.parser.time.hour()),
+          static_cast<unsigned>(g_gpsState.parser.time.minute()),
+          static_cast<unsigned>(g_gpsState.parser.time.second()),
+          static_cast<unsigned>(g_gpsState.parser.time.centisecond()));
   out->longitudeNano = g_gpsState.longitudeNano;
   out->latitudeNano = g_gpsState.latitudeNano;
   out->satellites = g_gpsState.parser.satellites.value();
