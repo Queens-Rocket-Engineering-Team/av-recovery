@@ -10,7 +10,8 @@
 enum ConsoleMenu : uint8_t {
   CONSOLE_MENU_ROOT      = 0U,
   CONSOLE_MENU_LOG_MASK  = 1U,
-  CONSOLE_MENU_FLASH     = 2U
+  CONSOLE_MENU_FLASH     = 2U,
+  CONSOLE_MENU_FLASH_ERASE_CONFIRM = 3U
 };
 
 static Stream* s_serial = nullptr;
@@ -59,6 +60,10 @@ static void showMenu(ConsoleMenu menu) {
     case CONSOLE_MENU_FLASH:
       s_serial->println("FLASH: q exit | b back");
       s_serial->println("1 info | 2 dump | 3 erase");
+      break;
+    case CONSOLE_MENU_FLASH_ERASE_CONFIRM:
+      s_serial->println("FLASH ERASE: q exit | b back");
+      s_serial->println("1 confirm");
       break;
     default:
       s_menu = CONSOLE_MENU_ROOT;
@@ -208,8 +213,23 @@ ConsoleAction consoleService(uint8_t currentState, uint32_t networkNowMs) {
         case '2':
           return CONSOLE_ACTION_FLASH_DUMP;
         case '3':
+          showMenu(CONSOLE_MENU_FLASH_ERASE_CONFIRM);
+          break;
+        default:
+          break;
+      }
+      break;
+
+    case CONSOLE_MENU_FLASH_ERASE_CONFIRM:
+      if (c == 'b') {
+        showMenu(CONSOLE_MENU_FLASH);
+        break;
+      }
+      switch (c) {
+        case '1':
           return CONSOLE_ACTION_FLASH_ERASE;
         default:
+          showMenu(CONSOLE_MENU_FLASH_ERASE_CONFIRM);
           break;
       }
       break;
