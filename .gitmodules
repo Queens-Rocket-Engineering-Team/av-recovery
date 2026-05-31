@@ -1,0 +1,4 @@
+[submodule "Firmware/av-libraries"]
+	path = Firmware/av-libraries
+	url = git@github.com:Queens-Rocket-Engineering-Team/av-libraries.git
+	branch = stable-v0.4.x
