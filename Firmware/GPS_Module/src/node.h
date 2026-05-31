@@ -60,6 +60,7 @@ struct GpsDebugSnapshot {
   bool hasValidTime;
   bool hasValidLocation;
   uint32_t timeOfDayMs;
+  char readableTimeStr[20];
   int64_t longitudeNano;
   int64_t latitudeNano;
   uint32_t satellites;

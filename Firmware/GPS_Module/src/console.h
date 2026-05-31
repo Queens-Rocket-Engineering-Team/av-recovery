@@ -16,6 +16,7 @@ enum ConsoleAction : uint8_t {
   CONSOLE_ACTION_FLASH_INFO  = 3U,
   CONSOLE_ACTION_FLASH_DUMP  = 4U,
   CONSOLE_ACTION_FLASH_ERASE = 5U
+  // Add more console actions as needed
 };
 
 void consoleInit(Stream& serial,
