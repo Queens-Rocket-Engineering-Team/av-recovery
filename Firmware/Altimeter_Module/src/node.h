@@ -24,7 +24,8 @@ constexpr uint32_t kSerialBaud = 38400U;
 // Application logic entry points. Bodies are stubs until the altimeter's
 // barometer/IMU sensing and pyro/recovery control are implemented.
 void nodeInit(uint32_t nowMs);
-void nodeServiceCanTx(uint32_t schedulerNowMs, AimNetwork& aim);
 void nodeUpdate(uint32_t schedulerNowMs);
+void nodeServiceCanTx(uint32_t schedulerNowMs, AimNetwork& aim);
+void nodeOnRx(const aim::Msg& m, uint32_t nowMs);
 
 #endif  // NODE_H

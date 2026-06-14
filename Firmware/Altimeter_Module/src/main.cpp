@@ -12,13 +12,12 @@ static AimNetwork g_aim(&g_canHw, aim::Source::Altimeter);
 static SoftwareSerial g_serial(pins::kSerialRx, pins::kSerialTx);
 static Logger g_log(g_serial, static_cast<uint8_t>(aim::Source::Altimeter), LogLevel::INFO);
 
-void serviceCanRx(void) {
-  // Bounded RX drain. receive() disciplines the local clock on TimeSync.
+static void serviceCanRx(void) {
+  const uint32_t nowMs = millis();
   for (uint8_t i = 0U; i < kMaxRxFramesPerLoop; i++) {
     aim::Msg m = {};
-    if (!g_aim.receive(m)) {
-      break;
-    }
+    if (!g_aim.receive(m)) break;
+    nodeOnRx(m, nowMs);
   }
 }
 

@@ -164,3 +164,8 @@ void nodeUpdate(uint32_t schedulerNowMs) {
     g_gpsState.hasValidLocation = true;
   }
 }
+void nodeOnRx(const aim::Msg& m, uint32_t nowMs) {
+  // TODO: handle cross-node events (e.g. power state) once subjects are defined.
+  (void)m;
+  (void)nowMs;
+}

@@ -32,14 +32,12 @@ static SpiNorFlashDriver g_flashDriver(pins::kFlashCs, g_flashSpi);
 static AimFileSystem g_fs(&g_flashDriver);
 static AimFlightRecorder g_recorder(g_fs, kLogCols, kLogOriginRefresh, kLogMaxSize, kLogHeaders);
 
-void serviceCanRx(void) {
-  // Bounded RX drain. receive() disciplines the local clock on TimeSync; this
-  // node has nothing else to consume.
+static void serviceCanRx(void) {
+  const uint32_t nowMs = millis();
   for (uint8_t i = 0U; i < kMaxRxFramesPerLoop; i++) {
     aim::Msg m = {};
-    if (!g_aim.receive(m)) {
-      break;
-    }
+    if (!g_aim.receive(m)) break;
+    nodeOnRx(m, nowMs);
   }
 }
 
