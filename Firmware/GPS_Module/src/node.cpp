@@ -109,6 +109,10 @@ void nodeServiceCanTx(uint32_t schedulerNowMs, AimNetwork& aim) {
   }
 }
 
+static bool s_gpsI2cFailed = false;
+static bool s_gpsNoData = false;
+static bool s_lowPower = false;
+
 void nodeUpdate(uint32_t schedulerNowMs) {
   // Retrieve and parse GPS NMEA sentences over I2C, and update network time base.
 
@@ -118,21 +122,26 @@ void nodeUpdate(uint32_t schedulerNowMs) {
   Wire.write(0xFFU);
   const uint8_t txStatus = Wire.endTransmission(false);
   if (txStatus != 0U) {
+    s_gpsI2cFailed = true;
     if (g_gpsState.i2cErrorLogJob.due(schedulerNowMs)) {
       LOG_WARN("GPS I2C request failed status=%u", static_cast<unsigned>(txStatus));
     }
   } else {
+    s_gpsI2cFailed = false;
     (void)Wire.requestFrom(static_cast<uint8_t>(pins::kGpsAddr), kGpsReadChunkBytes);
     for (uint8_t i = 0U; (i < kGpsReadChunkBytes) && (Wire.available() > 0); i++) {
       (void)g_gpsState.parser.encode(static_cast<char>(Wire.read()));
     }
   }
 
-  if (!g_gpsState.loggedNoDataWarning &&
-      (schedulerNowMs > kGpsNoDataWarnAfterMs) &&
-      (g_gpsState.parser.charsProcessed() < 10UL)) {
-    LOG_WARN("No GPS NMEA data detected yet");
-    g_gpsState.loggedNoDataWarning = true;
+  if (schedulerNowMs > kGpsNoDataWarnAfterMs && g_gpsState.parser.charsProcessed() < 10UL) {
+    s_gpsNoData = true;
+    if (!g_gpsState.loggedNoDataWarning) {
+      LOG_WARN("No GPS NMEA data detected yet");
+      g_gpsState.loggedNoDataWarning = true;
+    }
+  } else {
+    s_gpsNoData = false;
   }
 
   // Update network time from GPS
@@ -164,8 +173,29 @@ void nodeUpdate(uint32_t schedulerNowMs) {
     g_gpsState.hasValidLocation = true;
   }
 }
+
 void nodeOnRx(const aim::Msg& m, uint32_t nowMs) {
-  // TODO: handle cross-node events (e.g. power state) once subjects are defined.
-  (void)m;
   (void)nowMs;
+  if (m.cls == aim::Class::Event && m.subject == aim::subject::LowPower) {
+    s_lowPower = (m.b[0] == 1U);
+    LOG_INFO("GPS low power state updated: %d", s_lowPower);
+  }
+}
+
+aim::NodeState nodeCurrentState() {
+  if (s_gpsI2cFailed) {
+    return aim::NodeState::Fault;
+  }
+  return aim::NodeState::Nominal;
+}
+
+uint16_t nodeErrorBits() {
+  uint16_t bits = 0U;
+  if (s_gpsI2cFailed) {
+    bits |= (1U << 0);
+  }
+  if (s_gpsNoData) {
+    bits |= (1U << 1);
+  }
+  return bits;
 }
