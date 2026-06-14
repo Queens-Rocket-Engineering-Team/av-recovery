@@ -17,10 +17,6 @@ constexpr uint32_t kCanBaud    = 500000U;
 constexpr uint32_t kSerialBaud = 38400U;
 }  // namespace node
 
-// CAN peripheral handle — CAN1 is a HAL macro (reinterpret_cast pointer), so it
-// cannot be constexpr; it stays a #define.
-#define NODE_CAN_BUS CAN1
-
 struct GpsDebugSnapshot {
   bool parserTimeValid;
   bool parserLocationValid;

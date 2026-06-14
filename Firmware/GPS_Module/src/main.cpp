@@ -21,7 +21,7 @@ static constexpr uint16_t kLogOriginRefresh  = 64U;
 static constexpr uint32_t kLogMaxSize        = 1UL * 1024UL * 1024UL;
 static const char* const  kLogHeaders[kLogCols] = {"time"};
 
-static AimCanDriver g_canHw(node::kCanBaud, NODE_CAN_BUS);
+static AimCanDriver g_canHw(node::kCanBaud, CAN1);
 static AimNetwork g_aim(&g_canHw, aim::Source::Gps);
 static SoftwareSerial g_serial(pins::kSerialRx, pins::kSerialTx);
 static Logger g_log(g_serial, static_cast<uint8_t>(aim::Source::Gps), LogLevel::INFO);

@@ -7,7 +7,7 @@
 static constexpr uint32_t kWatchdogTimeoutUs  = 2000000U;
 static constexpr uint8_t  kMaxRxFramesPerLoop = 8U;
 
-static AimCanDriver g_canHw(node::kCanBaud, NODE_CAN_BUS);
+static AimCanDriver g_canHw(node::kCanBaud, CAN1);
 static AimNetwork g_aim(&g_canHw, aim::Source::Altimeter);
 static SoftwareSerial g_serial(pins::kSerialRx, pins::kSerialTx);
 static Logger g_log(g_serial, static_cast<uint8_t>(aim::Source::Altimeter), LogLevel::INFO);

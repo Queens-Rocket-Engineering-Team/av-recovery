@@ -17,10 +17,6 @@ constexpr uint32_t kCanBaud    = 500000U;
 constexpr uint32_t kSerialBaud = 38400U;
 }  // namespace node
 
-// CAN peripheral handle — CAN1 is a HAL macro (reinterpret_cast pointer), so it
-// cannot be constexpr; it stays a #define.
-#define NODE_CAN_BUS CAN1
-
 // Application logic entry points. Bodies are stubs until the altimeter's
 // barometer/IMU sensing and pyro/recovery control are implemented.
 void nodeInit(uint32_t nowMs);
