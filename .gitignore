@@ -47,3 +47,6 @@ fp-info-cache
 *.vscode
 
 *.pio
+
+# Windows alternate data streams (created when files are downloaded on Windows/WSL)
+*:Zone.Identifier

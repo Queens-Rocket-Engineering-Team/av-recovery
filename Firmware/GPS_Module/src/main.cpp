@@ -1,203 +1,166 @@
 #include "node.h"
-#include "console.h"
 
 #include <IWatchdog.h>
 #include <logger.h>
 #include <SoftwareSerial.h>
 #include <SPI.h>
-#include <SerialFlash.h>
-#include <flash_table.h>
+
+#include <aim_file_system.h>
+#include <aim_flight_recorder.h>
+#ifndef FLIGHT_BUILD
+#include <aim_console.h>
+#endif
 
 static constexpr uint32_t kWatchdogTimeoutUs = 2000000U;
 static constexpr uint8_t kMaxRxFramesPerLoop = 8U;
 
-struct NodeSchedulerState {
-  NodeState value = INIT;
-  uint32_t lastHeartbeatTxMs = 0U;
-};
+// Flight-recorder geometry. No telemetry rows are written yet; the recorder
+// exists so the console can dump/erase. Headers must have static lifetime.
+static constexpr uint8_t  kLogCols           = 1U;
+static constexpr uint16_t kLogOriginRefresh  = 64U;
+static constexpr uint32_t kLogMaxSize        = 1UL * 1024UL * 1024UL;
+static const char* const  kLogHeaders[kLogCols] = {"time"};
 
-static AimCanDriver g_canHw(NODE_ORIGIN, NODE_CAN_BAUD, NODE_CAN_BUS);
-static AimNetwork g_aim(&g_canHw, NODE_ORIGIN);
-static SoftwareSerial g_serial(NODE_SERIAL_RX_PIN, NODE_SERIAL_TX_PIN);
-static Logger g_log(g_serial, NODE_ORIGIN, LogLevel::INFO);
-static uint32_t g_flashLastVals[NODE_FLASH_TABLE_COLS];
-static uint8_t g_flashIoBuffer[NODE_MCU_BUFFER_SIZE];
-static FlashTable g_flashTable(
-  &SerialFlash,
-  NODE_FLASH_TABLE_COLS,
-  NODE_FLASH_ORIGIN_REFRESH_INT,
-  NODE_FLASH_TABLE_SIZE,
-  NODE_FLASH_TABLE_NUM,
-  NODE_MCU_BUFFER_SIZE,
-  g_flashLastVals,
-  g_flashIoBuffer);
-static NodeSchedulerState g_schedulerState = {};
+static AimCanDriver g_canHw(node::kCanBaud, NODE_CAN_BUS);
+static AimNetwork g_aim(&g_canHw, aim::Source::Gps);
+static SoftwareSerial g_serial(pins::kSerialRx, pins::kSerialTx);
+static Logger g_log(g_serial, static_cast<uint8_t>(aim::Source::Gps), LogLevel::INFO);
 
-void serviceCanRx(uint32_t networkNowMs) {
-  // Handle incoming bus messages and custom packet branches here.
-  (void)networkNowMs;
+// Flash on SPI2: MOSI=PB15, MISO=PB14, SCLK=PB13, CS=PB12 (see pinouts.h).
+static SPIClass g_flashSpi(pins::kSpiMosi, pins::kSpiMiso, pins::kSpiSclk);
+static SpiNorFlashDriver g_flashDriver(pins::kFlashCs, g_flashSpi);
+static AimFileSystem g_fs(&g_flashDriver);
+static AimFlightRecorder g_recorder(g_fs, kLogCols, kLogOriginRefresh, kLogMaxSize, kLogHeaders);
+
+void serviceCanRx(void) {
+  // Bounded RX drain. receive() disciplines the local clock on TimeSync; this
+  // node has nothing else to consume.
   for (uint8_t i = 0U; i < kMaxRxFramesPerLoop; i++) {
-    aimPkt pkt = {};
-    if (!g_aim.readPkt(pkt)) {
+    aim::Msg m = {};
+    if (!g_aim.receive(m)) {
       break;
     }
   }
 }
-
-void serviceCanTx(uint32_t schedulerNowMs, uint32_t networkNowMs) {
-  // Add periodic transmit-side behavior in this service pattern.
-
-  // TX SECTION 1: node heartbeat.
-  if ((schedulerNowMs - g_schedulerState.lastHeartbeatTxMs) >= AIM_HEARTBEAT_TX_INTERVAL_DEFAULT_MS) {
-    g_schedulerState.lastHeartbeatTxMs = schedulerNowMs;
-    const uint32_t payload = static_cast<uint32_t>(g_schedulerState.value);
-    const bool heartbeatSent = g_aim.sendTimedPkt(networkNowMs, payload, AIM_DEST_BROADCAST, AIM_TYP_HEARTBEAT);
-    if (!heartbeatSent) {
-      LOG_ERROR("Heartbeat TX failed");
-    } else {
-      LOG_DEBUG("Heartbeat TX ok");
-    }
-  }
-
-  nodeServiceCanTx(schedulerNowMs, networkNowMs, g_aim);
-}
-
-void runStateMachine(uint32_t schedulerNowMs, uint32_t networkNowMs) {
-  AIM_ASSERT(g_schedulerState.value <= FAULT);  // precondition: corrupted state -> reset
-
-  switch (g_schedulerState.value) {
-    case OPERATIONAL:
-#ifndef FLIGHT_BUILD
-      if (consoleCheckEntry() == CONSOLE_ACTION_ENTER) {
-        g_schedulerState.value = DEBUG_CONSOLE;
-      }
-#endif
-      break;
 
 #ifndef FLIGHT_BUILD
-    case DEBUG_CONSOLE: {
-      const ConsoleAction act = consoleService(
-          static_cast<uint8_t>(g_schedulerState.value), networkNowMs);
-      if (act == CONSOLE_ACTION_EXIT) {
-        g_schedulerState.value = OPERATIONAL;
-      } else if (act == CONSOLE_ACTION_FLASH_INFO) {
-        g_flashTable.commandInfo(&g_serial);
-      } else if (act == CONSOLE_ACTION_FLASH_DUMP) {
-        if (g_flashTable.commandDump(&g_serial, 512U, nullptr, nullptr)) {
-          g_schedulerState.value = FLASH_DUMP;
-          g_serial.print("state=");
-          g_serial.println(static_cast<unsigned>(FLASH_DUMP));
-        }
-      } else if (act == CONSOLE_ACTION_FLASH_ERASE) {
-        g_flashTable.commandErase(&g_serial);
-        g_schedulerState.value = FLASH_ERASE;
-      }
-      break;
-    }
+static void hookStatus(Stream& out) {
+  out.print("name=");
+  out.print(node::kName);
+  out.print(" logMask=0x");
+  out.print(static_cast<unsigned>(g_log.filterMask()), HEX);
+  out.print(" syncedMs=");
+  out.print(static_cast<unsigned long>(g_aim.syncedMillis()));
+  out.print(" version=");
+  out.print(aim::kNetworkVersionString);
+  out.print(" schema=");
+  out.print(static_cast<unsigned>(aim::kSchemaVersion));
+  out.print(" build=");
+  out.print(__DATE__);
+  out.print(" ");
+  out.println(__TIME__);
+}
 
-    case FLASH_DUMP: {
-      if (g_serial.available() > 0) {
-        const int c = g_serial.read();
-        if (c == 'q' || c == 'Q') {
-          g_flashTable.cancelDump();
-          g_serial.println("flash dump canceled");
-          g_schedulerState.value = DEBUG_CONSOLE;
-          g_serial.print("state=");
-          g_serial.println(static_cast<unsigned>(DEBUG_CONSOLE));
-          consoleResume();
-          break;
-        }
-      }
-
-      const FlashTableServiceResult r = g_flashTable.serviceDump(&g_serial, 16U);
-      if (r != FLASHTABLE_SERVICE_ACTIVE) {
-        static const char* const kDumpMsg[] = {
-          "flash dump idle",
-          nullptr,
-          "flash dump done",
-          "flash dump aborted",
-          "flash dump error"
-        };
-        const uint8_t idx = static_cast<uint8_t>(r);
-        if (idx < 5U && kDumpMsg[idx] != nullptr) {
-          g_serial.println(kDumpMsg[idx]);
-        }
-        g_schedulerState.value = DEBUG_CONSOLE;
-        g_serial.print("state=");
-        g_serial.println(static_cast<unsigned>(DEBUG_CONSOLE));
-        consoleResume();
-      }
-      break;
-    }
-
-    case FLASH_ERASE: {
-      const FlashTableServiceResult r = g_flashTable.serviceErase();
-      if (r != FLASHTABLE_SERVICE_ACTIVE) {
-        g_serial.println(r == FLASHTABLE_SERVICE_DONE ? "flash erase done" : "flash erase error");
-        g_schedulerState.value = DEBUG_CONSOLE;
-        consoleResume();
-      }
-      break;
-    }
-#endif
-
-    case SAFE_MODE:
-    case LOW_POWER:
-    case FAULT:
-      break;
-
-    default:
-      AIM_ASSERT(false);
-      break;
+static void hookGpsSnapshot(Stream& out) {
+  GpsDebugSnapshot gps = {};
+  if (!nodeGetGpsDebugSnapshot(&gps)) {
+    out.println("gps snapshot unavailable");
+    return;
   }
 
-  nodeUpdate(schedulerNowMs);
-  serviceCanTx(schedulerNowMs, networkNowMs);
+  out.print("gps timeValid(parser/state)=");
+  out.print(static_cast<unsigned>(gps.parserTimeValid ? 1U : 0U));
+  out.print("/");
+  out.println(static_cast<unsigned>(gps.hasValidTime ? 1U : 0U));
+
+  out.print("gps locValid(parser/state)=");
+  out.print(static_cast<unsigned>(gps.parserLocationValid ? 1U : 0U));
+  out.print("/");
+  out.println(static_cast<unsigned>(gps.hasValidLocation ? 1U : 0U));
+
+  out.print("gps sats(valid/count)=");
+  out.print(static_cast<unsigned>(gps.parserSatellitesValid ? 1U : 0U));
+  out.print("/");
+  out.println(static_cast<unsigned long>(gps.satellites));
+
+  out.print("timeOfDayMs=");
+  out.println(static_cast<unsigned long>(gps.timeOfDayMs));
+
+  out.print("lonNano=");
+  out.println(static_cast<long long>(gps.longitudeNano));
+  out.print("latNano=");
+  out.println(static_cast<long long>(gps.latitudeNano));
 }
+
+static void hookGpsParserStats(Stream& out) {
+  GpsDebugSnapshot gps = {};
+  if (!nodeGetGpsDebugSnapshot(&gps)) {
+    out.println("gps parser stats unavailable");
+    return;
+  }
+
+  out.print("chars=");
+  out.println(static_cast<unsigned long>(gps.charsProcessed));
+  out.print("sentencesWithFix=");
+  out.println(static_cast<unsigned long>(gps.sentencesWithFix));
+  out.print("checksum pass/fail=");
+  out.print(static_cast<unsigned long>(gps.passedChecksum));
+  out.print("/");
+  out.println(static_cast<unsigned long>(gps.failedChecksum));
+}
+
+static const AimConsoleHook kConsoleHooks[] = {
+  {'s', "status", hookStatus},
+  {'g', "gps snapshot", hookGpsSnapshot},
+  {'p', "gps parser stats", hookGpsParserStats},
+};
+#endif  // FLIGHT_BUILD
 
 void setup(void) {
-  AIM_ASSERT(NODE_ORIGIN <= AIM_ORG_ADDR_MAX);
-  g_serial.begin(NODE_SERIAL_BAUD);
+  g_serial.begin(node::kSerialBaud);
   g_logger = &g_log;
-  LOG_INFO("Boot node origin=%u", static_cast<unsigned>(NODE_ORIGIN));
+  LOG_INFO("Boot %s source=%u", node::kName, static_cast<unsigned>(aim::Source::Gps));
   IWatchdog.begin(kWatchdogTimeoutUs);
   LOG_INFO("Watchdog ready");
 
-  g_aim.begin();
+  // GPS is a TimeSync consumer; it accepts Time (to discipline its clock) and
+  // Heartbeat. It publishes Sensor frames but does not need to receive them.
+  if (!g_aim.begin(aim::classBit(aim::Class::Time) |
+                   aim::classBit(aim::Class::Heartbeat))) {
+    LOG_ERROR("CAN init failed");
+  }
+
+  if (!g_fs.begin()) {
+    LOG_WARN("Filesystem mount failed");
+  } else if (!g_recorder.begin()) {
+    LOG_WARN("Recorder init failed");
+  } else {
+    LOG_INFO("Flash ready");
+  }
 
 #ifndef FLIGHT_BUILD
-  consoleInit(g_serial, g_aim, g_log);
+  aimConsoleInit(g_serial, g_fs, g_recorder, node::kName, kConsoleHooks,
+                 static_cast<uint8_t>(sizeof(kConsoleHooks) / sizeof(kConsoleHooks[0])));
 #endif
-
-  // NODE EXTENSION POINT: add one-time node setup here.
-  SPI.setSCLK(NODE_FLASH_SCK_PIN);
-  SPI.setMISO(NODE_FLASH_MISO_PIN);
-  SPI.setMOSI(NODE_FLASH_MOSI_PIN);
-  SPI.begin();
-  if (SerialFlash.begin(NODE_FLASH_CS_PIN)) {
-    g_flashTable.init(&g_serial);
-  }
-  if (g_flashTable.isReady()) {
-    LOG_INFO("Flash ready");
-  } else {
-    LOG_WARN("Flash init failed");
-  }
 
   nodeInit(millis());
 #ifndef FLIGHT_BUILD
   g_serial.println("Console ready. d=enter debug");
 #endif
-  g_schedulerState.lastHeartbeatTxMs = millis();
-  g_schedulerState.value = OPERATIONAL;
 }
 
 void loop(void) {
   const uint32_t schedulerNowMs = millis();
-  const uint32_t networkNowMs = nodeGetNetworkNowMs(schedulerNowMs);
 
-  // Main scheduler order: RX, state machine, watchdog.
-  serviceCanRx(networkNowMs);
-  runStateMachine(schedulerNowMs, networkNowMs);
+  // Core work runs every loop, even while the console is active.
+  serviceCanRx();
+  nodeUpdate(schedulerNowMs);                   // GPS I2C read + parse
+  nodeServiceCanTx(schedulerNowMs, g_aim);      // GPS position fix, 1 Hz
+  g_aim.service(aim::NodeState::Nominal, 0U);   // heartbeat fills bus silence
+
+#ifndef FLIGHT_BUILD
+  aimConsoleService();                           // owns console + flash dump/erase
+#endif
 
   IWatchdog.reload();
 }

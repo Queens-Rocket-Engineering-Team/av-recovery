@@ -12,7 +12,7 @@
 
 // Node-level identity and interface configuration lives in this file.
 namespace node {
-constexpr char     kName[]     = "GPS_MODULE";
+constexpr char     kName[]     = "ALTIMETER_MODULE";
 constexpr uint32_t kCanBaud    = 500000U;
 constexpr uint32_t kSerialBaud = 38400U;
 }  // namespace node
@@ -21,26 +21,8 @@ constexpr uint32_t kSerialBaud = 38400U;
 // cannot be constexpr; it stays a #define.
 #define NODE_CAN_BUS CAN1
 
-struct GpsDebugSnapshot {
-  bool parserTimeValid;
-  bool parserLocationValid;
-  bool parserSatellitesValid;
-  bool hasValidTime;
-  bool hasValidLocation;
-  uint32_t timeOfDayMs;
-  char readableTimeStr[20];
-  int64_t longitudeNano;
-  int64_t latitudeNano;
-  uint32_t satellites;
-  uint32_t charsProcessed;
-  uint32_t sentencesWithFix;
-  uint32_t failedChecksum;
-  uint32_t passedChecksum;
-};
-
-bool nodeGetGpsDebugSnapshot(GpsDebugSnapshot* out);
-
-// Add node-specific periodic behavior in nodeUpdate().
+// Application logic entry points. Bodies are stubs until the altimeter's
+// barometer/IMU sensing and pyro/recovery control are implemented.
 void nodeInit(uint32_t nowMs);
 void nodeServiceCanTx(uint32_t schedulerNowMs, AimNetwork& aim);
 void nodeUpdate(uint32_t schedulerNowMs);

@@ -3,12 +3,10 @@
 #include <logger.h>
 #include <Wire.h>
 #include <TinyGPS++.h>
+#include <aim_job.h>
 
-static constexpr uint32_t kTimeSyncTxIntervalMs = 250U;
-static constexpr uint32_t kGpsCoordTxIntervalMs = 1000U;
 static constexpr uint8_t kGpsReadChunkBytes = 64U;
 static constexpr uint32_t kGpsNoDataWarnAfterMs = 5000U;
-static constexpr uint32_t kGpsI2cErrorLogIntervalMs = 5000U;
 static constexpr int64_t kGpsDegreesToNanoScale = 1000000000LL;
 
 struct GpsState {
@@ -18,11 +16,9 @@ struct GpsState {
   uint32_t timeOfDayMs = 0U;
   int64_t longitudeNano = 0LL;
   int64_t latitudeNano = 0LL;
-  uint32_t lastI2cErrorLogMs = 0U;
-  uint32_t lastTimeSyncTxMs = 0U;
-  uint32_t lastGpsCoordTxMs = 0U;
+  aim::Job i2cErrorLogJob{5000U};
+  aim::Job coordTxJob{1000U};
   bool loggedNoDataWarning = false;
-  bool loggedNoGpsTimeWarning = false;
   bool loggedNoGpsLocationWarning = false;
 };
 
@@ -69,64 +65,47 @@ bool nodeGetGpsDebugSnapshot(GpsDebugSnapshot* out) {
 }
 
 void nodeInit(uint32_t nowMs) {
-  Wire.setSCL(NODE_GPS_SCL_PIN);
-  Wire.setSDA(NODE_GPS_SDA_PIN);
+  (void)nowMs;
+  Wire.setSCL(pins::kGpsScl);
+  Wire.setSDA(pins::kGpsSda);
   Wire.begin();
-  LOG_INFO("GPS I2C ready addr=0x%02X", static_cast<unsigned>(NODE_GPS_ADDR));
-
-  g_gpsState.lastTimeSyncTxMs = nowMs;
-  g_gpsState.lastGpsCoordTxMs = nowMs;
+  LOG_INFO("GPS I2C ready addr=0x%02X", static_cast<unsigned>(pins::kGpsAddr));
 }
 
-uint32_t nodeGetNetworkNowMs(uint32_t schedulerNowMs) {
-  if (g_gpsState.hasValidTime) {
-    return g_gpsState.timeOfDayMs;
+void nodeServiceCanTx(uint32_t schedulerNowMs, AimNetwork& aim) {
+  // GPS does not master the clock — it only consumes TimeSync (handled inside
+  // AimNetwork::receive). The only periodic TX is the GPS position fix.
+  if (!g_gpsState.coordTxJob.due(schedulerNowMs)) {
+    return;
   }
 
-  return schedulerNowMs;
-}
-
-void nodeServiceCanTx(uint32_t schedulerNowMs, uint32_t networkNowMs, AimNetwork& aim) {
-  (void)networkNowMs;
-
-  // TX SECTION 2: strict GPS time-of-day sync in 64-bit payload.
-  if ((schedulerNowMs - g_gpsState.lastTimeSyncTxMs) >= kTimeSyncTxIntervalMs) {
-    g_gpsState.lastTimeSyncTxMs = schedulerNowMs;
-
-    if (!g_gpsState.hasValidTime) {
-      if (!g_gpsState.loggedNoGpsTimeWarning) {
-        LOG_WARN("Time sync TX paused until GPS time is valid");
-        g_gpsState.loggedNoGpsTimeWarning = true;
-      }
-    } else {
-      g_gpsState.loggedNoGpsTimeWarning = false;
-      const bool syncSent = aim.sendPkt64(static_cast<uint64_t>(g_gpsState.timeOfDayMs), AIM_DEST_BROADCAST, AIM_TYP_TIME);
-      if (!syncSent) {
-        LOG_ERROR("Time sync TX failed");
-      }
+  if (!g_gpsState.hasValidLocation) {
+    if (!g_gpsState.loggedNoGpsLocationWarning) {
+      LOG_WARN("GPS coordinate TX paused until location is valid");
+      g_gpsState.loggedNoGpsLocationWarning = true;
     }
+    return;
   }
+  g_gpsState.loggedNoGpsLocationWarning = false;
 
-  // TX SECTION 3: COMMs GPS coordinates, long then lat, each as signed nano-degrees in 64-bit payload.
-  if ((schedulerNowMs - g_gpsState.lastGpsCoordTxMs) >= kGpsCoordTxIntervalMs) {
-    g_gpsState.lastGpsCoordTxMs = schedulerNowMs;
+  // Catalog scaling: GpsLat/GpsLon are degrees x10^7 (i32). Parser values are
+  // nano-degrees (x10^9), so divide by 100. Max |180e7| < INT32_MAX.
+  aim::Msg lon = {};
+  lon.cls = aim::Class::Sensor;
+  lon.subject = aim::subject::GpsLon;
+  lon.setSensorValue(static_cast<int32_t>(g_gpsState.longitudeNano / 100LL));
+  const bool lonSent = aim.send(lon);
 
-    if (!g_gpsState.hasValidLocation) {
-      if (!g_gpsState.loggedNoGpsLocationWarning) {
-        LOG_WARN("GPS coordinate TX paused until location is valid");
-        g_gpsState.loggedNoGpsLocationWarning = true;
-      }
-    } else {
-      g_gpsState.loggedNoGpsLocationWarning = false;
+  aim::Msg lat = {};
+  lat.cls = aim::Class::Sensor;
+  lat.subject = aim::subject::GpsLat;
+  lat.setSensorValue(static_cast<int32_t>(g_gpsState.latitudeNano / 100LL));
+  const bool latSent = aim.send(lat);
 
-      const bool longSent = aim.sendPkt64(static_cast<uint64_t>(g_gpsState.longitudeNano), AIM_DEST_COMMS, AIM_TYP_GPS_LONG);
-      const bool latSent = aim.sendPkt64(static_cast<uint64_t>(g_gpsState.latitudeNano), AIM_DEST_COMMS, AIM_TYP_GPS_LAT);
-      if (!longSent || !latSent) {
-        LOG_ERROR("GPS coord TX failed (long=%u lat=%u)",
-                  static_cast<unsigned>(longSent ? 1U : 0U),
-                  static_cast<unsigned>(latSent ? 1U : 0U));
-      }
-    }
+  if (!lonSent || !latSent) {
+    LOG_ERROR("GPS coord TX failed (lon=%u lat=%u)",
+              static_cast<unsigned>(lonSent ? 1U : 0U),
+              static_cast<unsigned>(latSent ? 1U : 0U));
   }
 }
 
@@ -135,16 +114,15 @@ void nodeUpdate(uint32_t schedulerNowMs) {
 
   // Pull GPS data over I2C
   // The GPS module exposes a single data register at 0xFF.
-  Wire.beginTransmission(static_cast<uint8_t>(NODE_GPS_ADDR));
+  Wire.beginTransmission(static_cast<uint8_t>(pins::kGpsAddr));
   Wire.write(0xFFU);
   const uint8_t txStatus = Wire.endTransmission(false);
   if (txStatus != 0U) {
-    if ((schedulerNowMs - g_gpsState.lastI2cErrorLogMs) >= kGpsI2cErrorLogIntervalMs) {
+    if (g_gpsState.i2cErrorLogJob.due(schedulerNowMs)) {
       LOG_WARN("GPS I2C request failed status=%u", static_cast<unsigned>(txStatus));
-      g_gpsState.lastI2cErrorLogMs = schedulerNowMs;
     }
   } else {
-    (void)Wire.requestFrom(static_cast<uint8_t>(NODE_GPS_ADDR), kGpsReadChunkBytes);
+    (void)Wire.requestFrom(static_cast<uint8_t>(pins::kGpsAddr), kGpsReadChunkBytes);
     for (uint8_t i = 0U; (i < kGpsReadChunkBytes) && (Wire.available() > 0); i++) {
       (void)g_gpsState.parser.encode(static_cast<char>(Wire.read()));
     }
