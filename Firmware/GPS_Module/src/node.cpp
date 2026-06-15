@@ -199,3 +199,63 @@ uint16_t nodeErrorBits() {
   }
   return bits;
 }
+
+#ifndef FLIGHT_BUILD
+static void hookGpsSnapshot(Stream& out) {
+  GpsDebugSnapshot gps = {};
+  if (!nodeGetGpsDebugSnapshot(&gps)) {
+    out.println("gps snapshot unavailable");
+    return;
+  }
+
+  out.print("gps timeValid(parser/state)=");
+  out.print(static_cast<unsigned>(gps.parserTimeValid ? 1U : 0U));
+  out.print("/");
+  out.println(static_cast<unsigned>(gps.hasValidTime ? 1U : 0U));
+
+  out.print("gps locValid(parser/state)=");
+  out.print(static_cast<unsigned>(gps.parserLocationValid ? 1U : 0U));
+  out.print("/");
+  out.println(static_cast<unsigned>(gps.hasValidLocation ? 1U : 0U));
+
+  out.print("gps sats(valid/count)=");
+  out.print(static_cast<unsigned>(gps.parserSatellitesValid ? 1U : 0U));
+  out.print("/");
+  out.println(static_cast<unsigned long>(gps.satellites));
+
+  out.print("timeOfDayMs=");
+  out.println(static_cast<unsigned long>(gps.timeOfDayMs));
+
+  out.print("lonNano=");
+  out.println(static_cast<long long>(gps.longitudeNano));
+  out.print("latNano=");
+  out.println(static_cast<long long>(gps.latitudeNano));
+}
+
+static void hookGpsParserStats(Stream& out) {
+  GpsDebugSnapshot gps = {};
+  if (!nodeGetGpsDebugSnapshot(&gps)) {
+    out.println("gps parser stats unavailable");
+    return;
+  }
+
+  out.print("chars=");
+  out.println(static_cast<unsigned long>(gps.charsProcessed));
+  out.print("sentencesWithFix=");
+  out.println(static_cast<unsigned long>(gps.sentencesWithFix));
+  out.print("checksum pass/fail=");
+  out.print(static_cast<unsigned long>(gps.passedChecksum));
+  out.print("/");
+  out.println(static_cast<unsigned long>(gps.failedChecksum));
+}
+
+static const AimConsoleHook s_consoleHooks[] = {
+  {'g', "gps snapshot", hookGpsSnapshot},
+  {'p', "gps parser stats", hookGpsParserStats},
+};
+
+const AimConsoleHook* nodeConsoleHooks(uint8_t& count) {
+  count = sizeof(s_consoleHooks) / sizeof(s_consoleHooks[0]);
+  return s_consoleHooks;
+}
+#endif

@@ -59,59 +59,6 @@ static void hookStatus(Stream& out) {
   out.println(__TIME__);
 }
 
-static void hookGpsSnapshot(Stream& out) {
-  GpsDebugSnapshot gps = {};
-  if (!nodeGetGpsDebugSnapshot(&gps)) {
-    out.println("gps snapshot unavailable");
-    return;
-  }
-
-  out.print("gps timeValid(parser/state)=");
-  out.print(static_cast<unsigned>(gps.parserTimeValid ? 1U : 0U));
-  out.print("/");
-  out.println(static_cast<unsigned>(gps.hasValidTime ? 1U : 0U));
-
-  out.print("gps locValid(parser/state)=");
-  out.print(static_cast<unsigned>(gps.parserLocationValid ? 1U : 0U));
-  out.print("/");
-  out.println(static_cast<unsigned>(gps.hasValidLocation ? 1U : 0U));
-
-  out.print("gps sats(valid/count)=");
-  out.print(static_cast<unsigned>(gps.parserSatellitesValid ? 1U : 0U));
-  out.print("/");
-  out.println(static_cast<unsigned long>(gps.satellites));
-
-  out.print("timeOfDayMs=");
-  out.println(static_cast<unsigned long>(gps.timeOfDayMs));
-
-  out.print("lonNano=");
-  out.println(static_cast<long long>(gps.longitudeNano));
-  out.print("latNano=");
-  out.println(static_cast<long long>(gps.latitudeNano));
-}
-
-static void hookGpsParserStats(Stream& out) {
-  GpsDebugSnapshot gps = {};
-  if (!nodeGetGpsDebugSnapshot(&gps)) {
-    out.println("gps parser stats unavailable");
-    return;
-  }
-
-  out.print("chars=");
-  out.println(static_cast<unsigned long>(gps.charsProcessed));
-  out.print("sentencesWithFix=");
-  out.println(static_cast<unsigned long>(gps.sentencesWithFix));
-  out.print("checksum pass/fail=");
-  out.print(static_cast<unsigned long>(gps.passedChecksum));
-  out.print("/");
-  out.println(static_cast<unsigned long>(gps.failedChecksum));
-}
-
-static const AimConsoleHook kConsoleHooks[] = {
-  {'s', "status", hookStatus},
-  {'g', "gps snapshot", hookGpsSnapshot},
-  {'p', "gps parser stats", hookGpsParserStats},
-};
 #endif  // FLIGHT_BUILD
 
 void setup(void) {
@@ -137,8 +84,16 @@ void setup(void) {
   }
 
 #ifndef FLIGHT_BUILD
-  aimConsoleInit(g_serial, g_fs, g_recorder, node::kName, kConsoleHooks,
-                 static_cast<uint8_t>(sizeof(kConsoleHooks) / sizeof(kConsoleHooks[0])));
+  uint8_t nodeHookCount = 0U;
+  const AimConsoleHook* nodeHooks = nodeConsoleHooks(nodeHookCount);
+
+  AimConsoleHook combinedHooks[8];
+  uint8_t totalHooks = 0;
+  combinedHooks[totalHooks++] = {'s', "status", hookStatus};
+  for (uint8_t i = 0; i < nodeHookCount && totalHooks < 8; i++) {
+    combinedHooks[totalHooks++] = nodeHooks[i];
+  }
+  aimConsoleInit(g_serial, g_fs, g_recorder, node::kName, combinedHooks, totalHooks);
 #endif
 
   nodeInit(millis());
