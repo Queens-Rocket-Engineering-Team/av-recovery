@@ -109,7 +109,7 @@ void loop(void) {
   serviceCanRx();
   nodeUpdate(schedulerNowMs);                   // GPS I2C read + parse
   nodeServiceCanTx(schedulerNowMs, g_aim);      // GPS position fix, 1 Hz
-  g_aim.service(nodeCurrentState(), nodeErrorBits());   // heartbeat fills bus silence
+  g_aim.service(schedulerNowMs, nodeCurrentState(), nodeErrorBits());   // heartbeat fills bus silence
 
 #ifndef FLIGHT_BUILD
   aimConsoleService();                           // owns console + flash dump/erase

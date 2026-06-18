@@ -44,7 +44,7 @@ void loop(void) {
   serviceCanRx();
   nodeUpdate(schedulerNowMs);
   nodeServiceCanTx(schedulerNowMs, g_aim);
-  g_aim.service(nodeCurrentState(), nodeErrorBits());   // heartbeat fills bus silence
+  g_aim.service(schedulerNowMs, nodeCurrentState(), nodeErrorBits());   // heartbeat fills bus silence
 
   IWatchdog.reload();
 }
