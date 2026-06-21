@@ -37,9 +37,9 @@ struct GpsDebugSnapshot {
 bool nodeGetGpsDebugSnapshot(GpsDebugSnapshot* out);
 
 // Add node-specific periodic behavior in nodeUpdate().
-void nodeInit(uint32_t nowMs);
-void nodeUpdate(uint32_t schedulerNowMs);
-void nodeServiceCanTx(uint32_t schedulerNowMs, AimNetwork& aim);
+void nodeInit();
+void nodeUpdate(uint32_t nowMs);
+void nodeServiceCanTx(uint32_t nowMs, AimNetwork& aim);
 void nodeOnRx(const aim::Msg& m, uint32_t nowMs);
 
 aim::NodeState nodeCurrentState();
