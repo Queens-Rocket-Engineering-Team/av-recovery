@@ -14,17 +14,16 @@
 static constexpr uint32_t kWatchdogTimeoutUs = 2000000U;
 static constexpr uint8_t kMaxRxFramesPerLoop = 8U;
 
-// Flight-recorder geometry. No telemetry rows are written yet; the recorder
-// exists so the console can dump/erase. Headers must have static lifetime.
-static constexpr uint8_t  kLogCols           = 1U;
+// Flight-recorder geometry.
+static constexpr uint8_t  kLogCols           = 4U;
 static constexpr uint16_t kLogOriginRefresh  = 64U;
 static constexpr uint32_t kLogMaxSize        = 1UL * 1024UL * 1024UL;
-static const char* const  kLogHeaders[kLogCols] = {"time"};
+static const char* const  kLogHeaders[kLogCols] = {"time", "lon", "lat", "alt"};
 
-static AimCanDriver g_canHw(node::kCanBaud, CAN1);
-static AimNetwork g_aim(&g_canHw, aim::Source::Gps);
+static AimCanHardware g_canHw(node::kCanBaud, CAN1);
+static AimNetwork g_aim(&g_canHw, node::kSource);
 static SoftwareSerial g_serial(pins::kSerialRx, pins::kSerialTx);
-static Logger g_log(g_serial, static_cast<uint8_t>(aim::Source::Gps), LogLevel::INFO);
+static Logger g_log(g_serial, static_cast<uint8_t>(node::kSource), LogLevel::INFO);
 
 // Flash on SPI2: MOSI=PB15, MISO=PB14, SCLK=PB13, CS=PB12 (see pinouts.h).
 static SPIClass g_flashSpi(pins::kSpiMosi, pins::kSpiMiso, pins::kSpiSclk);
@@ -64,14 +63,12 @@ static void hookStatus(Stream& out) {
 void setup(void) {
   g_serial.begin(node::kSerialBaud);
   g_logger = &g_log;
-  LOG_INFO("Boot %s source=%u", node::kName, static_cast<unsigned>(aim::Source::Gps));
+  LOG_INFO("Boot %s source=%u", node::kName, static_cast<unsigned>(node::kSource));
   IWatchdog.begin(kWatchdogTimeoutUs);
   LOG_INFO("Watchdog ready");
 
-  // GPS is a TimeSync consumer; it accepts Time (to discipline its clock) and
-  // Heartbeat. It publishes Sensor frames but does not need to receive them.
   if (!g_aim.begin(aim::classBit(aim::Class::Time) |
-                   aim::classBit(aim::Class::Heartbeat))) {
+                   aim::classBit(aim::Class::Event))) {
     LOG_ERROR("CAN init failed");
   }
 
@@ -87,6 +84,7 @@ void setup(void) {
   uint8_t nodeHookCount = 0U;
   const AimConsoleHook* nodeHooks = nodeConsoleHooks(nodeHookCount);
 
+  // aimConsoleInit requires static storage since it does not copy the array
   static AimConsoleHook combinedHooks[8];
   uint8_t totalHooks = 0;
   combinedHooks[totalHooks++] = {'s', "status", hookStatus};
@@ -107,11 +105,12 @@ void loop(void) {
 
   serviceCanRx();
   nodeUpdate(nowMs);
+  nodeServiceLog(nowMs, g_recorder);
   nodeServiceCanTx(nowMs, g_aim);
-  g_aim.service(nowMs, nodeCurrentState(), nodeErrorBits());   // heartbeat fills bus silence
+  g_aim.service(nowMs, nodeCurrentState(), nodeErrorBits());
 
 #ifndef FLIGHT_BUILD
-  aimConsoleService();                           // owns console + flash dump/erase
+  aimConsoleService();
 #endif
 
   IWatchdog.reload();

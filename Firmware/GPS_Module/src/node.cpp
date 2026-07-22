@@ -5,54 +5,48 @@
 #include <Wire.h>
 #include <TinyGPS++.h>
 #include <aim_job.h>
+#include <aim_flight_recorder.h>
 
-static constexpr uint8_t kGpsReadChunkBytes = 64U;
+static constexpr uint8_t  kGpsReadChunkBytes    = 64U;
 static constexpr uint32_t kGpsNoDataWarnAfterMs = 5000U;
-static constexpr int64_t kGpsDegreesToNanoScale = 1000000000LL;
 
-struct GpsState {
-  TinyGPSPlus parser;
-  bool hasValidTime = false;
-  bool hasValidLocation = false;
-  uint32_t timeOfDayMs = 0U;
-  int64_t longitudeNano = 0LL;
-  int64_t latitudeNano = 0LL;
-  aim::Job i2cErrorLogJob{5000U, 0U};
-  aim::Job coordTxJob{1000U, 0U};
-  bool loggedNoDataWarning = false;
-  bool loggedNoGpsLocationWarning = false;
-};
+// Current boot default: 1 Hz (kGpsIdlePeriodMs).
+// POTENTIAL FIX: Start at 10 Hz (kGpsActivePeriodMs) on boot so flight logging is active by default,
+// and only slow down to 1 Hz when explicitly commanded by an event (e.g. GroundPowerStatus or LowPower).
+static constexpr uint32_t kGpsActivePeriodMs = 100U;   // 10 Hz active flight
+static constexpr uint32_t kGpsIdlePeriodMs   = 1000U;  // 1 Hz pad / landed / low power (boot default)
+static constexpr uint32_t kSatTxPeriodMs     = 5000U;  // 0.2 Hz (once every 5 seconds)
 
-static GpsState s_gpsState = {};
+static TinyGPSPlus s_parser;
+static bool s_hasValidTime = false;
+static bool s_hasValidLocation = false;
+static char s_readableTimeStr[20] = "N/A";
+static int32_t s_lat1e7 = 0;
+static int32_t s_lon1e7 = 0;
+static int32_t s_altMeters = 0;
+
 static bool s_gpsI2cFailed = false;
 static bool s_gpsNoData = false;
 static bool s_lowPower = false;
+static bool s_loggedNoDataWarn = false;
+static bool s_loggedNoLocWarn = false;
+
+static aim::Job s_i2cErrorLogJob{5000U, 0U};
+static aim::Job s_coordTxJob{kGpsIdlePeriodMs, 0U};
+static aim::Job s_flashLogJob{kGpsIdlePeriodMs, 0U};
+static aim::Job s_satTxJob{kSatTxPeriodMs, 0U};
 
 static Adafruit_NeoPixel s_rgbLeds(1U, pins::kRgbData, NEO_GRB + NEO_KHZ800);
 
-static uint32_t gpsTimeToCentiseconds(TinyGPSTime& gpsTime) {
-  const uint32_t hh = static_cast<uint32_t>(gpsTime.hour());
-  const uint32_t mm = static_cast<uint32_t>(gpsTime.minute());
-  const uint32_t ss = static_cast<uint32_t>(gpsTime.second());
-  const uint32_t cs = static_cast<uint32_t>(gpsTime.centisecond());
-
-  return ((((hh * 60U) + mm) * 60U) + ss) * 100U + cs;
-}
-
-static int64_t rawDegreesToNano(const RawDegrees& raw) {
-  int64_t nano = static_cast<int64_t>(raw.deg) * kGpsDegreesToNanoScale;
-  nano += static_cast<int64_t>(raw.billionths);
-  if (raw.negative) {
-    nano = -nano;
-  }
-
-  return nano;
+static int32_t rawDegreesTo1e7(const RawDegrees& raw) {
+  int32_t deg1e7 = static_cast<int32_t>(raw.deg) * 10000000L + static_cast<int32_t>(raw.billionths / 100U);
+  return raw.negative ? -deg1e7 : deg1e7;
 }
 
 static void updateLed(aim::NodeState state) {
-  uint8_t color = 3; // blue default
-  if (state == aim::NodeState::Fault) { color = 2; }
-  else if (state == aim::NodeState::Nominal && s_gpsState.hasValidLocation) { color = 1; }
+  uint8_t color = 3; // blue default (searching)
+  if (state == aim::NodeState::Fault) { color = 2; } // red
+  else if (state == aim::NodeState::Nominal && s_hasValidLocation) { color = 1; } // green
 
   static uint8_t s_lastColor = 0xFF;
   if (color == s_lastColor) return;
@@ -62,27 +56,6 @@ static void updateLed(aim::NodeState state) {
   switch (color) { case 1: g = 255; break; case 2: r = 255; break; default: b = 255; break; }
   s_rgbLeds.setPixelColor(0, s_rgbLeds.Color(r, g, b));
   s_rgbLeds.show();
-}
-
-bool nodeGetGpsDebugSnapshot(GpsDebugSnapshot* out) {
-  if (out == nullptr) {
-    return false;
-  }
-
-  out->parserTimeValid = s_gpsState.parser.time.isValid();
-  out->parserLocationValid = s_gpsState.parser.location.isValid();
-  out->parserSatellitesValid = s_gpsState.parser.satellites.isValid();
-  out->hasValidTime = s_gpsState.hasValidTime;
-  out->hasValidLocation = s_gpsState.hasValidLocation;
-  out->timeOfDayMs = s_gpsState.timeOfDayMs;
-  out->longitudeNano = s_gpsState.longitudeNano;
-  out->latitudeNano = s_gpsState.latitudeNano;
-  out->satellites = s_gpsState.parser.satellites.value();
-  out->charsProcessed = s_gpsState.parser.charsProcessed();
-  out->sentencesWithFix = s_gpsState.parser.sentencesWithFix();
-  out->failedChecksum = s_gpsState.parser.failedChecksum();
-  out->passedChecksum = s_gpsState.parser.passedChecksum();
-  return true;
 }
 
 void nodeInit() {
@@ -104,161 +77,183 @@ void nodeUpdate(uint32_t nowMs) {
   const uint8_t txStatus = Wire.endTransmission(false);
   if (txStatus != 0U) {
     s_gpsI2cFailed = true;
-    if (s_gpsState.i2cErrorLogJob.due(nowMs)) {
+    if (s_i2cErrorLogJob.due(nowMs)) {
       LOG_WARN("GPS I2C request failed status=%u", static_cast<unsigned>(txStatus));
     }
   } else {
     s_gpsI2cFailed = false;
     (void)Wire.requestFrom(static_cast<uint8_t>(pins::kGpsAddr), kGpsReadChunkBytes);
     for (uint8_t i = 0U; (i < kGpsReadChunkBytes) && (Wire.available() > 0); i++) {
-      (void)s_gpsState.parser.encode(static_cast<char>(Wire.read()));
+      uint8_t b = static_cast<uint8_t>(Wire.read());
+      // SAM-M10Q returns 0xFF when I2C stream FIFO is empty — do not feed 0xFF pad bytes to NMEA parser.
+      if (b != 0xFFU) {
+        (void)s_parser.encode(static_cast<char>(b));
+      }
     }
   }
 
-  if (nowMs > kGpsNoDataWarnAfterMs && s_gpsState.parser.charsProcessed() < 10UL) {
+  if (nowMs > kGpsNoDataWarnAfterMs && s_parser.charsProcessed() < 10UL) {
     s_gpsNoData = true;
-    if (!s_gpsState.loggedNoDataWarning) {
+    if (!s_loggedNoDataWarn) {
       LOG_WARN("No GPS NMEA data detected yet");
-      s_gpsState.loggedNoDataWarning = true;
+      s_loggedNoDataWarn = true;
     }
   } else {
     s_gpsNoData = false;
   }
 
-  if (!s_gpsState.parser.time.isValid()) {
-    s_gpsState.hasValidTime = false;
+  if (!s_parser.time.isValid()) {
+    s_hasValidTime = false;
   } else {
-    const uint32_t currentTimeOfDayCs = gpsTimeToCentiseconds(s_gpsState.parser.time);
-    s_gpsState.timeOfDayMs = currentTimeOfDayCs * 10U;
-    if (!s_gpsState.hasValidTime) {
-      s_gpsState.hasValidTime = true;
-      LOG_INFO(
-          "GPS time lock acquired %02u:%02u:%02u.%02u",
-          static_cast<unsigned>(s_gpsState.parser.time.hour()),
-          static_cast<unsigned>(s_gpsState.parser.time.minute()),
-          static_cast<unsigned>(s_gpsState.parser.time.second()),
-          static_cast<unsigned>(s_gpsState.parser.time.centisecond()));
+    if (!s_hasValidTime) {
+      s_hasValidTime = true;
+      LOG_INFO("GPS time lock acquired");
+    }
+    if (s_parser.time.isUpdated()) {
+      snprintf(s_readableTimeStr, sizeof(s_readableTimeStr), "%02u:%02u:%02u.%02u",
+               static_cast<unsigned>(s_parser.time.hour()),
+               static_cast<unsigned>(s_parser.time.minute()),
+               static_cast<unsigned>(s_parser.time.second()),
+               static_cast<unsigned>(s_parser.time.centisecond()));
     }
   }
 
-  if (!s_gpsState.parser.location.isValid()) {
-    s_gpsState.hasValidLocation = false;
+  if (!s_parser.location.isValid()) {
+    s_hasValidLocation = false;
   } else {
-    const RawDegrees rawLng = s_gpsState.parser.location.rawLng();
-    const RawDegrees rawLat = s_gpsState.parser.location.rawLat();
+    s_lon1e7 = rawDegreesTo1e7(s_parser.location.rawLng());
+    s_lat1e7 = rawDegreesTo1e7(s_parser.location.rawLat());
+    s_hasValidLocation = true;
+  }
 
-    s_gpsState.longitudeNano = rawDegreesToNano(rawLng);
-    s_gpsState.latitudeNano = rawDegreesToNano(rawLat);
-    s_gpsState.hasValidLocation = true;
+  if (s_parser.altitude.isValid()) {
+    s_altMeters = static_cast<int32_t>(s_parser.altitude.meters()); // Whole meters MSL
   }
 }
 
+void nodeServiceLog(uint32_t nowMs, AimFlightRecorder& recorder) {
+  if (!recorder.isLogging()) {
+    return;
+  }
+
+  if (!s_flashLogJob.due(nowMs)) {
+    return;
+  }
+
+  if (!s_hasValidLocation || !s_parser.location.isUpdated()) {
+    return;
+  }
+
+  uint32_t rowData[4] = {
+    nowMs,
+    AimFlightRecorder::unsignify(s_lon1e7),
+    AimFlightRecorder::unsignify(s_lat1e7),
+    AimFlightRecorder::unsignify(s_altMeters)
+  };
+
+  (void)recorder.writeRow(rowData);
+}
+
 void nodeServiceCanTx(uint32_t nowMs, AimNetwork& aim) {
-  if (!s_gpsState.coordTxJob.due(nowMs)) {
-    return;
-  }
-
-  if (!s_gpsState.hasValidLocation) {
-    if (!s_gpsState.loggedNoGpsLocationWarning) {
-      LOG_WARN("GPS coordinate TX paused until location is valid");
-      s_gpsState.loggedNoGpsLocationWarning = true;
+  // 1. High-frequency position broadcast (10 Hz in flight / 1 Hz on pad)
+  if (s_coordTxJob.due(nowMs)) {
+    if (!s_hasValidLocation) {
+      if (!s_loggedNoLocWarn) {
+        LOG_WARN("GPS coordinate TX paused until location is valid");
+        s_loggedNoLocWarn = true;
+      }
+    } else {
+      s_loggedNoLocWarn = false;
+      aim::Msg gpsPos = {};
+      gpsPos.cls = aim::Class::Sensor;
+      gpsPos.subject = aim::subject::GpsPosition;
+      gpsPos.setGpsPosition(s_lon1e7, s_lat1e7);
+      if (!aim.send(gpsPos)) {
+        LOG_ERROR("GPS coord TX failed");
+      }
     }
-    return;
   }
-  s_gpsState.loggedNoGpsLocationWarning = false;
 
-  aim::Msg lon = {};
-  lon.cls = aim::Class::Sensor;
-  lon.subject = aim::subject::GpsLon;
-  lon.setSensorValue(static_cast<int32_t>(s_gpsState.longitudeNano / 100LL));
-  const bool lonSent = aim.send(lon);
-
-  aim::Msg lat = {};
-  lat.cls = aim::Class::Sensor;
-  lat.subject = aim::subject::GpsLat;
-  lat.setSensorValue(static_cast<int32_t>(s_gpsState.latitudeNano / 100LL));
-  const bool latSent = aim.send(lat);
-
-  if (!lonSent || !latSent) {
-    LOG_ERROR("GPS coord TX failed (lon=%u lat=%u)",
-              static_cast<unsigned>(lonSent ? 1U : 0U),
-              static_cast<unsigned>(latSent ? 1U : 0U));
+  // 2. Low-frequency satellite count broadcast (once every 5 seconds)
+  if (s_satTxJob.due(nowMs) && s_parser.satellites.isValid()) {
+    aim::Msg satsMsg = {};
+    satsMsg.cls = aim::Class::Sensor;
+    satsMsg.subject = aim::subject::GpsNumSats;
+    satsMsg.setSensorValue(static_cast<int32_t>(s_parser.satellites.value()));
+    (void)aim.send(satsMsg);
   }
 }
 
 void nodeOnRx(const aim::Msg& m, uint32_t nowMs) {
   (void)nowMs;
-  if (m.cls == aim::Class::Event && m.subject == aim::subject::LowPower) {
-    s_lowPower = (m.b[0] == 1U);
-    LOG_INFO("GPS low power state updated: %d", s_lowPower);
+  if (m.cls == aim::Class::Event) {
+    if (m.subject == aim::subject::LaunchDetect) {
+      s_coordTxJob.periodMs = kGpsActivePeriodMs;
+      s_flashLogJob.periodMs = kGpsActivePeriodMs;
+      LOG_INFO("LaunchDetect received: GPS rates -> %lu ms (10 Hz)", kGpsActivePeriodMs);
+    } else if (m.subject == aim::subject::LowPower) {
+      s_lowPower = (m.b[0] == 1U);
+      const uint32_t newPeriod = s_lowPower ? kGpsIdlePeriodMs : kGpsActivePeriodMs;
+      s_coordTxJob.periodMs = newPeriod;
+      s_flashLogJob.periodMs = newPeriod;
+      LOG_INFO("GPS low power state updated: %d (period=%lu ms)", s_lowPower, newPeriod);
+    }
   }
 }
 
 aim::NodeState nodeCurrentState() {
-  if (s_gpsI2cFailed) {
-    return aim::NodeState::Fault;
-  }
-  return aim::NodeState::Nominal;
+  return s_gpsI2cFailed ? aim::NodeState::Fault : aim::NodeState::Nominal;
 }
 
 uint16_t nodeErrorBits() {
   uint16_t bits = 0U;
-  if (s_gpsI2cFailed) {
-    bits |= (1U << 0);
-  }
-  if (s_gpsNoData) {
-    bits |= (1U << 1);
-  }
+  if (s_gpsI2cFailed) bits |= (1U << 0);
+  if (s_gpsNoData)    bits |= (1U << 1);
   return bits;
 }
 
 #ifndef FLIGHT_BUILD
 static void hookGpsSnapshot(Stream& out) {
-  GpsDebugSnapshot gps = {};
-  if (!nodeGetGpsDebugSnapshot(&gps)) {
-    out.println("gps snapshot unavailable");
-    return;
-  }
-
   out.print("gps timeValid(parser/state)=");
-  out.print(static_cast<unsigned>(gps.parserTimeValid ? 1U : 0U));
+  out.print(s_parser.time.isValid() ? 1 : 0);
   out.print("/");
-  out.println(static_cast<unsigned>(gps.hasValidTime ? 1U : 0U));
+  out.println(s_hasValidTime ? 1 : 0);
 
   out.print("gps locValid(parser/state)=");
-  out.print(static_cast<unsigned>(gps.parserLocationValid ? 1U : 0U));
+  out.print(s_parser.location.isValid() ? 1 : 0);
   out.print("/");
-  out.println(static_cast<unsigned>(gps.hasValidLocation ? 1U : 0U));
+  out.println(s_hasValidLocation ? 1 : 0);
 
   out.print("gps sats(valid/count)=");
-  out.print(static_cast<unsigned>(gps.parserSatellitesValid ? 1U : 0U));
+  out.print(s_parser.satellites.isValid() ? 1 : 0);
   out.print("/");
-  out.println(static_cast<unsigned long>(gps.satellites));
+  out.println(static_cast<unsigned long>(s_parser.satellites.value()));
 
-  out.print("timeOfDayMs=");
-  out.println(static_cast<unsigned long>(gps.timeOfDayMs));
+  out.print("UTC Time=");
+  out.println(s_readableTimeStr);
 
-  out.print("lonNano=");
-  out.println(static_cast<long long>(gps.longitudeNano));
-  out.print("latNano=");
-  out.println(static_cast<long long>(gps.latitudeNano));
+  out.print("lon1e7=");
+  out.println(static_cast<long>(s_lon1e7));
+  out.print("lat1e7=");
+  out.println(static_cast<long>(s_lat1e7));
+  out.print("altMeters=");
+  out.println(static_cast<long>(s_altMeters));
+
+  out.print("txPeriodMs=");
+  out.println(static_cast<unsigned long>(s_coordTxJob.periodMs));
+  out.print("logPeriodMs=");
+  out.println(static_cast<unsigned long>(s_flashLogJob.periodMs));
 }
 
 static void hookGpsParserStats(Stream& out) {
-  GpsDebugSnapshot gps = {};
-  if (!nodeGetGpsDebugSnapshot(&gps)) {
-    out.println("gps parser stats unavailable");
-    return;
-  }
-
   out.print("chars=");
-  out.println(static_cast<unsigned long>(gps.charsProcessed));
+  out.println(static_cast<unsigned long>(s_parser.charsProcessed()));
   out.print("sentencesWithFix=");
-  out.println(static_cast<unsigned long>(gps.sentencesWithFix));
+  out.println(static_cast<unsigned long>(s_parser.sentencesWithFix()));
   out.print("checksum pass/fail=");
-  out.print(static_cast<unsigned long>(gps.passedChecksum));
+  out.print(static_cast<unsigned long>(s_parser.passedChecksum()));
   out.print("/");
-  out.println(static_cast<unsigned long>(gps.failedChecksum));
+  out.println(static_cast<unsigned long>(s_parser.failedChecksum()));
 }
 
 static const AimConsoleHook s_consoleHooks[] = {
