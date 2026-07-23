@@ -1,3 +1,11 @@
+// node.cpp - GPS Module Application Logic
+// References:
+//   - u-blox SAM-M10Q Data Sheet & Integration Manual (UBX-22002218)
+//   - AIM Network v0.7.0 Protocol Spec & Migration Plan (Decision D12/D14)
+// Note: SAM-M10Q hardware is pre-configured via u-center (u-blox UBX-CFG) for:
+//   1. 10 Hz navigation update rate (matches kGpsActivePeriodMs = 100 ms)
+//   2. High-G / Airborne dynamic model (Airborne <4g / Dynamic Model 8)
+
 #include "node.h"
 
 #include <Adafruit_NeoPixel.h>
@@ -11,10 +19,8 @@ static constexpr uint8_t  kGpsReadChunkBytes    = 64U;
 static constexpr uint32_t kGpsNoDataWarnAfterMs = 5000U;
 
 // Current boot default: 1 Hz (kGpsIdlePeriodMs).
-// POTENTIAL FIX: Start at 10 Hz (kGpsActivePeriodMs) on boot so flight logging is active by default,
-// and only slow down to 1 Hz when explicitly commanded by an event (e.g. GroundPowerStatus or LowPower).
-static constexpr uint32_t kGpsActivePeriodMs = 100U;   // 10 Hz active flight
-static constexpr uint32_t kGpsIdlePeriodMs   = 1000U;  // 1 Hz pad / landed / low power (boot default)
+static constexpr uint32_t kGpsActivePeriodMs = 100U;   // 10 Hz active flight (SAM-M10Q hardware 10 Hz rate)
+static constexpr uint32_t kGpsIdlePeriodMs   = 1000U;  // 1 Hz pad / landed / low power
 static constexpr uint32_t kSatTxPeriodMs     = 5000U;  // 0.2 Hz (once every 5 seconds)
 
 static TinyGPSPlus s_parser;
@@ -66,7 +72,10 @@ void nodeInit() {
   Wire.setSCL(pins::kGpsScl);
   Wire.setSDA(pins::kGpsSda);
   Wire.begin();
-  LOG_INFO("GPS I2C ready addr=0x%02X", static_cast<unsigned>(pins::kGpsAddr));
+  Wire.setClock(400000);  // Fast-Mode I2C clock speed (400 kHz)
+  Wire.setTimeout(10U);   // 10 ms bus timeout protection
+
+  LOG_INFO("GPS I2C ready addr=0x%02X (SAM-M10Q 10 Hz High-G mode expected)", static_cast<unsigned>(pins::kGpsAddr));
 }
 
 void nodeUpdate(uint32_t nowMs) {
@@ -132,18 +141,17 @@ void nodeUpdate(uint32_t nowMs) {
 }
 
 void nodeServiceLog(uint32_t nowMs, AimFlightRecorder& recorder) {
-  if (!recorder.isLogging()) {
-    return;
-  }
+  if (!recorder.isLogging()) return;
+  if (!s_flashLogJob.due(nowMs)) return;
+  if (!s_hasValidLocation || !s_parser.location.isUpdated()) return;
 
-  if (!s_flashLogJob.due(nowMs)) {
-    return;
-  }
+  // FLASH WRITING DISABLED FOR BENCH TESTING.
+  // ROADMAP (D14): AimFlightRecorder will accept an AimColumnDef array (name, type, scaleFactor)
+  // to internally handle optimal bit-packing & self-describing serial dumps across all nodes.
+  (void)nowMs;
+  (void)recorder;
 
-  if (!s_hasValidLocation || !s_parser.location.isUpdated()) {
-    return;
-  }
-
+  /*
   uint32_t rowData[4] = {
     nowMs,
     AimFlightRecorder::unsignify(s_lon1e7),
@@ -152,6 +160,7 @@ void nodeServiceLog(uint32_t nowMs, AimFlightRecorder& recorder) {
   };
 
   (void)recorder.writeRow(rowData);
+  */
 }
 
 void nodeServiceCanTx(uint32_t nowMs, AimNetwork& aim) {
@@ -184,19 +193,43 @@ void nodeServiceCanTx(uint32_t nowMs, AimNetwork& aim) {
   }
 }
 
+void nodeSetTelemetryMode(bool active, AimNetwork& aim) {
+  const uint32_t newPeriod = active ? kGpsActivePeriodMs : kGpsIdlePeriodMs;
+  if (s_coordTxJob.periodMs != newPeriod) {
+    s_coordTxJob.periodMs  = newPeriod;
+    s_flashLogJob.periodMs = newPeriod;
+
+    aim::Msg modeEvt = {};
+    modeEvt.cls     = aim::Class::Event;
+    modeEvt.subject = aim::subject::TelemetryMode;
+    modeEvt.b[0]    = active ? 1U : 0U;
+    (void)aim.send(modeEvt);
+
+    LOG_INFO("GPS rate change event published (active=%d, period=%lu ms)",
+             static_cast<int>(active), newPeriod);
+  }
+}
+
 void nodeOnRx(const aim::Msg& m, uint32_t nowMs) {
   (void)nowMs;
   if (m.cls == aim::Class::Event) {
-    if (m.subject == aim::subject::LaunchDetect) {
-      s_coordTxJob.periodMs = kGpsActivePeriodMs;
-      s_flashLogJob.periodMs = kGpsActivePeriodMs;
-      LOG_INFO("LaunchDetect received: GPS rates -> %lu ms (10 Hz)", kGpsActivePeriodMs);
+    if (m.subject == aim::subject::LaunchDetect || m.subject == aim::subject::TelemetryMode) {
+      const bool isActive = (m.subject == aim::subject::LaunchDetect) || (m.b[0] == 1U);
+      const uint32_t newPeriod = isActive ? kGpsActivePeriodMs : kGpsIdlePeriodMs;
+      if (s_coordTxJob.periodMs != newPeriod) {
+        s_coordTxJob.periodMs  = newPeriod;
+        s_flashLogJob.periodMs = newPeriod;
+        LOG_INFO("TelemetryMode event (subj=0x%02X active=%d): GPS rates -> %lu ms (10 Hz)",
+                 static_cast<unsigned>(m.subject), static_cast<int>(isActive), newPeriod);
+      }
     } else if (m.subject == aim::subject::LowPower) {
       s_lowPower = (m.b[0] == 1U);
       const uint32_t newPeriod = s_lowPower ? kGpsIdlePeriodMs : kGpsActivePeriodMs;
-      s_coordTxJob.periodMs = newPeriod;
-      s_flashLogJob.periodMs = newPeriod;
-      LOG_INFO("GPS low power state updated: %d (period=%lu ms)", s_lowPower, newPeriod);
+      if (s_coordTxJob.periodMs != newPeriod) {
+        s_coordTxJob.periodMs  = newPeriod;
+        s_flashLogJob.periodMs = newPeriod;
+        LOG_INFO("GPS low power state updated: %d (period=%lu ms)", s_lowPower, newPeriod);
+      }
     }
   }
 }
