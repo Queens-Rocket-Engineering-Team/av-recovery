@@ -2,7 +2,7 @@
 // References:
 //   - u-blox SAM-M10Q Data Sheet & Integration Manual (UBX-22002218)
 //   - AIM Network v0.7.0 Protocol Spec & Migration Plan (Decision D12/D14)
-// Note: SAM-M10Q hardware is pre-configured via u-center (u-blox UBX-CFG) for:
+// MANDATORY PRE-FLIGHT CHECK: Make sure the SAM-M10Q GPS receiver is configured via u-center (u-blox UBX-CFG) for:
 //   1. 10 Hz navigation update rate (matches kGpsActivePeriodMs = 100 ms)
 //   2. High-G / Airborne dynamic model (Airborne <4g / Dynamic Model 8)
 
