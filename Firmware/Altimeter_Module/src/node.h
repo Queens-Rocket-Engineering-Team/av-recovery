@@ -4,25 +4,29 @@
 #include <Arduino.h>
 #include <cstdint>
 
-#include <aim_can_driver.h>
 #include <aim_network.h>
-#include <aim_safety.h>
 
 #include "pinouts.h"
 
-// Node-level identity and interface configuration lives in this file.
+class AimFlightRecorder;
+
+// Node-level identity and interface configuration.
 namespace node {
-constexpr char     kName[]     = "ALTIMETER_MODULE";
-constexpr uint32_t kCanBaud    = 500000U;
-constexpr uint32_t kSerialBaud = 38400U;
+constexpr char        kName[]     = "ALTIMETER_MODULE";
+constexpr aim::Source kSource     = aim::Source::Altimeter;
+constexpr uint32_t    kCanBaud    = 1000000U;
+constexpr uint32_t    kSerialBaud = 38400U;
 }  // namespace node
 
-// Application logic entry points. Bodies are stubs until the altimeter's
-// barometer/IMU sensing and pyro/recovery control are implemented.
+// Application logic entry points.
 void nodeInit();
 void nodeUpdate(uint32_t nowMs);
+void nodeServiceLog(uint32_t nowMs, AimFlightRecorder& recorder);
 void nodeServiceCanTx(uint32_t nowMs, AimNetwork& aim);
 void nodeOnRx(const aim::Msg& m, uint32_t nowMs);
+
+// Dynamic data rate management (broadcasting TelemetryMode over CAN).
+void nodeSetTelemetryMode(bool active, AimNetwork& aim);
 
 aim::NodeState nodeCurrentState();
 uint16_t nodeErrorBits();

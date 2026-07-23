@@ -4,7 +4,8 @@
 #include <Arduino.h> // needed for PB/A# pin assignment
 #include <cstdint>
 
-// pinouts.h - STINGER Altmeter Module V2.0 2024/2025 (STM32F103CB) pin map.
+// pinouts.h - STINGER Altimeter Module V2.0 Pin Mapping (STM32F103CB)
+// Reference: STINGER V2.0 Hardware KiCad Schematic & PCB Layout (av-recovery/Schematics)
 namespace pins {
 
 // --- Serial (USB-UART Bridge; TX/RX are swapped on the PCB) ---

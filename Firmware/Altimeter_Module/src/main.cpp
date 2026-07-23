@@ -14,15 +14,17 @@
 static constexpr uint32_t kWatchdogTimeoutUs  = 2000000U;
 static constexpr uint8_t  kMaxRxFramesPerLoop = 8U;
 
-static constexpr uint8_t  kLogCols           = 1U;
+static constexpr uint8_t  kLogCols           = 10U;
 static constexpr uint16_t kLogOriginRefresh  = 64U;
 static constexpr uint32_t kLogMaxSize        = 1UL * 1024UL * 1024UL;
-static const char* const  kLogHeaders[kLogCols] = {"time"};
+static const char* const  kLogHeaders[kLogCols] = {
+  "time", "pressPa", "altCm", "accX", "accY", "accZ", "gyroX", "gyroY", "gyroZ", "highgZ"
+};
 
-static AimCanDriver g_canHw(node::kCanBaud, CAN1);
-static AimNetwork g_aim(&g_canHw, aim::Source::Altimeter);
+static AimCanHardware g_canHw(node::kCanBaud, CAN1);
+static AimNetwork g_aim(&g_canHw, node::kSource);
 static SoftwareSerial g_serial(pins::kSerialRx, pins::kSerialTx);
-static Logger g_log(g_serial, static_cast<uint8_t>(aim::Source::Altimeter), LogLevel::INFO);
+static Logger g_log(g_serial, static_cast<uint8_t>(node::kSource), LogLevel::INFO);
 
 static SPIClass g_flashSpi(pins::kSpiMosi, pins::kSpiMiso, pins::kSpiSclk);
 static SpiNorFlashDriver g_flashDriver(pins::kFlashCs, g_flashSpi);
@@ -60,13 +62,14 @@ static void hookStatus(Stream& out) {
 void setup(void) {
   g_serial.begin(node::kSerialBaud);
   g_logger = &g_log;
-  LOG_INFO("Boot %s source=%u", node::kName, static_cast<unsigned>(aim::Source::Altimeter));
+  LOG_INFO("Boot %s source=%u", node::kName, static_cast<unsigned>(node::kSource));
   IWatchdog.begin(kWatchdogTimeoutUs);
   LOG_INFO("Watchdog ready");
 
   SPI.begin();
 
   if (!g_aim.begin(aim::classBit(aim::Class::Time) |
+                   aim::classBit(aim::Class::Event) |
                    aim::classBit(aim::Class::Heartbeat))) {
     LOG_ERROR("CAN init failed");
   }
@@ -103,10 +106,11 @@ void setup(void) {
 }
 
 void loop(void) {
-  serviceCanRx();
   const uint32_t nowMs = millis();
+  serviceCanRx();
   nodeUpdate(nowMs);
-  nodeServiceCanTx(g_aim.syncedMillis(), g_aim);
+  nodeServiceLog(nowMs, g_recorder);
+  nodeServiceCanTx(nowMs, g_aim);
   g_aim.service(nowMs, nodeCurrentState(), nodeErrorBits());
 #ifndef FLIGHT_BUILD
   aimConsoleService();
