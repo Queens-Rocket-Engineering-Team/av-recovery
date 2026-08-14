@@ -18,11 +18,6 @@
 static constexpr uint8_t  kGpsReadChunkBytes    = 64U;
 static constexpr uint32_t kGpsNoDataWarnAfterMs = 5000U;
 
-// Current boot default: 1 Hz (kGpsIdlePeriodMs).
-static constexpr uint32_t kGpsActivePeriodMs = 100U;   // 10 Hz active flight (SAM-M10Q hardware 10 Hz rate)
-static constexpr uint32_t kGpsIdlePeriodMs   = 1000U;  // 1 Hz pad / landed / low power
-static constexpr uint32_t kSatTxPeriodMs     = 5000U;  // 0.2 Hz (once every 5 seconds)
-
 static TinyGPSPlus s_parser;
 static bool s_hasValidTime = false;
 static bool s_hasValidLocation = false;
@@ -37,10 +32,10 @@ static bool s_lowPower = false;
 static bool s_loggedNoDataWarn = false;
 static bool s_loggedNoLocWarn = false;
 
-static aim::Job s_i2cErrorLogJob{5000U, 0U};
-static aim::Job s_coordTxJob{kGpsIdlePeriodMs, 0U};
-static aim::Job s_flashLogJob{kGpsIdlePeriodMs, 0U};
-static aim::Job s_satTxJob{kSatTxPeriodMs, 0U};
+static aim::Job s_i2cErrorLogJob(5000U);     // 0.2 Hz error log rate
+static aim::Job s_coordTxJob(1000U, 100U);    // 1 Hz idle, 10 Hz active CAN tx
+static aim::Job s_flashLogJob(1000U, 100U);   // 1 Hz idle, 10 Hz active flight log
+static aim::Job s_satTxJob(5000U);           // 0.2 Hz satellite count tx
 
 static Adafruit_NeoPixel s_rgbLeds(1U, pins::kRgbData, NEO_GRB + NEO_KHZ800);
 
@@ -64,6 +59,107 @@ static void updateLed(aim::NodeState state) {
   s_rgbLeds.show();
 }
 
+static uint32_t s_lastFixSentenceMs = 0;
+static uint32_t s_fixDeltaMs = 0;
+
+static void ubxChecksum(const uint8_t* f, size_t from, size_t to, uint8_t& a, uint8_t& b) {
+  a = 0; b = 0;
+  for (size_t i = from; i < to; i++) { a += f[i]; b += a; }
+}
+
+static size_t buildUbxFrame(uint8_t cls, uint8_t id, const uint8_t* p, uint8_t n, uint8_t* out) {
+  out[0] = 0xB5; out[1] = 0x62; out[2] = cls; out[3] = id;
+  out[4] = static_cast<uint8_t>(n & 0xFF);
+  out[5] = static_cast<uint8_t>((n >> 8) & 0xFF);
+  memcpy(out + 6, p, n);
+  uint8_t a, b;
+  ubxChecksum(out, 2, 6 + n, a, b);
+  out[6 + n] = a; out[7 + n] = b;
+  return 8 + n;
+}
+
+static bool i2cWriteGps(const uint8_t* d, size_t n) {
+  Wire.beginTransmission(static_cast<uint8_t>(pins::kGpsAddr));
+  Wire.write(d, n);
+  return (Wire.endTransmission() == 0);
+}
+
+static uint16_t gpsAvailableBytes() {
+  Wire.beginTransmission(static_cast<uint8_t>(pins::kGpsAddr));
+  Wire.write(static_cast<uint8_t>(0xFD));
+  if (Wire.endTransmission(false) != 0) return 0;
+  Wire.requestFrom(static_cast<int>(pins::kGpsAddr), 2);
+  if (Wire.available() < 2) return 0;
+  uint16_t hi = Wire.read(), lo = Wire.read();
+  return (hi << 8) | lo;
+}
+
+static int gpsReadSingleByte() {
+  Wire.beginTransmission(static_cast<uint8_t>(pins::kGpsAddr));
+  Wire.write(static_cast<uint8_t>(0xFF));
+  if (Wire.endTransmission(false) != 0) return -1;
+  Wire.requestFrom(static_cast<int>(pins::kGpsAddr), 1);
+  if (!Wire.available()) return -1;
+  return Wire.read();
+}
+
+static bool waitForUbxAck(uint8_t expCls, uint8_t expId, uint32_t timeoutMs = 300) {
+  const uint32_t start = millis();
+  uint8_t state = 0, type = 0, cls = 0, id = 0;
+  while (millis() - start < timeoutMs) {
+    uint16_t avail = gpsAvailableBytes();
+    while (avail-- > 0) {
+      int b = gpsReadSingleByte();
+      if (b < 0) break;
+      switch (state) {
+        case 0: state = (b == 0xB5) ? 1 : 0; break;
+        case 1: state = (b == 0x62) ? 2 : 0; break;
+        case 2: state = (b == 0x05) ? 3 : 0; break;
+        case 3: if (b == 0x01 || b == 0x00) { type = static_cast<uint8_t>(b); state = 4; } else state = 0; break;
+        case 4: state = (b == 0x02) ? 5 : 0; break;
+        case 5: state = (b == 0x00) ? 6 : 0; break;
+        case 6: cls = static_cast<uint8_t>(b); state = 7; break;
+        case 7:
+          id = static_cast<uint8_t>(b); state = 0;
+          if (cls == expCls && id == expId) return (type == 0x01);
+          break;
+      }
+    }
+  }
+  return false;
+}
+
+static bool setCfgValU1(uint32_t key, uint8_t val) {
+  uint8_t p[9] = {0x00, 0x03, 0x00, 0x00, static_cast<uint8_t>(key), static_cast<uint8_t>(key >> 8), static_cast<uint8_t>(key >> 16), static_cast<uint8_t>(key >> 24), val};
+  uint8_t f[24];
+  size_t len = buildUbxFrame(0x06, 0x8A, p, sizeof(p), f);
+  if (!i2cWriteGps(f, len)) return false;
+  return waitForUbxAck(0x06, 0x8A);
+}
+
+static bool setCfgValU2(uint32_t key, uint16_t val) {
+  uint8_t p[10] = {0x00, 0x03, 0x00, 0x00, static_cast<uint8_t>(key), static_cast<uint8_t>(key >> 8), static_cast<uint8_t>(key >> 16), static_cast<uint8_t>(key >> 24), static_cast<uint8_t>(val), static_cast<uint8_t>(val >> 8)};
+  uint8_t f[24];
+  size_t len = buildUbxFrame(0x06, 0x8A, p, sizeof(p), f);
+  if (!i2cWriteGps(f, len)) return false;
+  return waitForUbxAck(0x06, 0x8A);
+}
+
+static bool configureGpsRuntime() {
+  bool ok = true;
+  ok &= setCfgValU2(0x30210001, 100);  // CFG-RATE-MEAS = 100ms (10 Hz)
+  ok &= setCfgValU2(0x30210002, 1);    // CFG-RATE-NAV  = 1 (1 fix/meas)
+  ok &= setCfgValU1(0x20110021, 8);    // CFG-NAVSPG-DYNMODEL = 8 (Airborne <4g)
+  ok &= setCfgValU1(0x10510002, 1);    // CFG-I2C-EXTENDEDTIMEOUT = true
+  ok &= setCfgValU1(0x1031001F, 1);    // GPS enable
+  ok &= setCfgValU1(0x10310021, 1);    // GALILEO enable
+  ok &= setCfgValU1(0x10310025, 0);    // GLONASS disable (for 10Hz limit)
+  ok &= setCfgValU1(0x10310022, 0);    // BEIDOU disable
+  ok &= setCfgValU1(0x10310020, 0);    // SBAS disable
+  ok &= setCfgValU1(0x10310024, 0);    // QZSS disable
+  return ok;
+}
+
 void nodeInit() {
   s_rgbLeds.begin();
   s_rgbLeds.setPixelColor(0, s_rgbLeds.Color(0, 0, 0));
@@ -75,7 +171,11 @@ void nodeInit() {
   Wire.setClock(400000);  // Fast-Mode I2C clock speed (400 kHz)
   Wire.setTimeout(10U);   // 10 ms bus timeout protection
 
-  LOG_INFO("GPS I2C ready addr=0x%02X (SAM-M10Q 10 Hz High-G mode expected)", static_cast<unsigned>(pins::kGpsAddr));
+  if (configureGpsRuntime()) {
+    LOG_INFO("SAM-M10Q configured: 10 Hz Airborne <4g (ACK verified)");
+  } else {
+    LOG_WARN("SAM-M10Q runtime config unconfirmed or NAK");
+  }
 }
 
 void nodeUpdate(uint32_t nowMs) {
@@ -119,6 +219,11 @@ void nodeUpdate(uint32_t nowMs) {
       LOG_INFO("GPS time lock acquired");
     }
     if (s_parser.time.isUpdated()) {
+      if (s_lastFixSentenceMs > 0U) {
+        s_fixDeltaMs = nowMs - s_lastFixSentenceMs;
+      }
+      s_lastFixSentenceMs = nowMs;
+
       snprintf(s_readableTimeStr, sizeof(s_readableTimeStr), "%02u:%02u:%02u.%02u",
                static_cast<unsigned>(s_parser.time.hour()),
                static_cast<unsigned>(s_parser.time.minute()),
@@ -141,17 +246,9 @@ void nodeUpdate(uint32_t nowMs) {
 }
 
 void nodeServiceLog(uint32_t nowMs, AimFlightRecorder& recorder) {
-  if (!recorder.isLogging()) return;
   if (!s_flashLogJob.due(nowMs)) return;
-  if (!s_hasValidLocation || !s_parser.location.isUpdated()) return;
+  if (!s_hasValidLocation) return;
 
-  // FLASH WRITING DISABLED FOR BENCH TESTING.
-  // ROADMAP (D14): AimFlightRecorder will accept an AimColumnDef array (name, type, scaleFactor)
-  // to internally handle optimal bit-packing & self-describing serial dumps across all nodes.
-  (void)nowMs;
-  (void)recorder;
-
-  /*
   uint32_t rowData[4] = {
     nowMs,
     AimFlightRecorder::unsignify(s_lon1e7),
@@ -159,8 +256,7 @@ void nodeServiceLog(uint32_t nowMs, AimFlightRecorder& recorder) {
     AimFlightRecorder::unsignify(s_altMeters)
   };
 
-  (void)recorder.writeRow(rowData);
-  */
+  recorder.writeRow(rowData);
 }
 
 void nodeServiceCanTx(uint32_t nowMs, AimNetwork& aim) {
@@ -193,43 +289,17 @@ void nodeServiceCanTx(uint32_t nowMs, AimNetwork& aim) {
   }
 }
 
-void nodeSetTelemetryMode(bool active, AimNetwork& aim) {
-  const uint32_t newPeriod = active ? kGpsActivePeriodMs : kGpsIdlePeriodMs;
-  if (s_coordTxJob.periodMs != newPeriod) {
-    s_coordTxJob.periodMs  = newPeriod;
-    s_flashLogJob.periodMs = newPeriod;
-
-    aim::Msg modeEvt = {};
-    modeEvt.cls     = aim::Class::Event;
-    modeEvt.subject = aim::subject::TelemetryMode;
-    modeEvt.b[0]    = active ? 1U : 0U;
-    (void)aim.send(modeEvt);
-
-    LOG_INFO("GPS rate change event published (active=%d, period=%lu ms)",
-             static_cast<int>(active), newPeriod);
-  }
-}
 
 void nodeOnRx(const aim::Msg& m, uint32_t nowMs) {
   (void)nowMs;
   if (m.cls == aim::Class::Event) {
     if (m.subject == aim::subject::LaunchDetect || m.subject == aim::subject::TelemetryMode) {
       const bool isActive = (m.subject == aim::subject::LaunchDetect) || (m.b[0] == 1U);
-      const uint32_t newPeriod = isActive ? kGpsActivePeriodMs : kGpsIdlePeriodMs;
-      if (s_coordTxJob.periodMs != newPeriod) {
-        s_coordTxJob.periodMs  = newPeriod;
-        s_flashLogJob.periodMs = newPeriod;
-        LOG_INFO("TelemetryMode event (subj=0x%02X active=%d): GPS rates -> %lu ms (10 Hz)",
-                 static_cast<unsigned>(m.subject), static_cast<int>(isActive), newPeriod);
-      }
+      LOG_INFO("TelemetryMode event (subj=0x%02X active=%d) received",
+               static_cast<unsigned>(m.subject), static_cast<int>(isActive));
     } else if (m.subject == aim::subject::LowPower) {
       s_lowPower = (m.b[0] == 1U);
-      const uint32_t newPeriod = s_lowPower ? kGpsIdlePeriodMs : kGpsActivePeriodMs;
-      if (s_coordTxJob.periodMs != newPeriod) {
-        s_coordTxJob.periodMs  = newPeriod;
-        s_flashLogJob.periodMs = newPeriod;
-        LOG_INFO("GPS low power state updated: %d (period=%lu ms)", s_lowPower, newPeriod);
-      }
+      LOG_INFO("GPS low power state updated: %d", s_lowPower);
     }
   }
 }
@@ -273,9 +343,9 @@ static void hookGpsSnapshot(Stream& out) {
   out.println(static_cast<long>(s_altMeters));
 
   out.print("txPeriodMs=");
-  out.println(static_cast<unsigned long>(s_coordTxJob.periodMs));
+  out.println(static_cast<unsigned long>(s_coordTxJob.periodMs()));
   out.print("logPeriodMs=");
-  out.println(static_cast<unsigned long>(s_flashLogJob.periodMs));
+  out.println(static_cast<unsigned long>(s_flashLogJob.periodMs()));
 }
 
 static void hookGpsParserStats(Stream& out) {
@@ -287,6 +357,15 @@ static void hookGpsParserStats(Stream& out) {
   out.print(static_cast<unsigned long>(s_parser.passedChecksum()));
   out.print("/");
   out.println(static_cast<unsigned long>(s_parser.failedChecksum()));
+  out.print("fixRate=");
+  out.print(static_cast<unsigned long>(s_fixDeltaMs));
+  out.print(" ms (");
+  if (s_fixDeltaMs > 0U) {
+    out.print(1000.0f / static_cast<float>(s_fixDeltaMs), 1);
+    out.println(" Hz)");
+  } else {
+    out.println("N/A)");
+  }
 }
 
 static const AimConsoleHook s_consoleHooks[] = {

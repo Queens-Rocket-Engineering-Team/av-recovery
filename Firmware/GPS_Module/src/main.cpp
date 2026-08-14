@@ -14,12 +14,6 @@
 static constexpr uint32_t kWatchdogTimeoutUs = 2000000U;
 static constexpr uint8_t kMaxRxFramesPerLoop = 8U;
 
-// Flight-recorder geometry.
-static constexpr uint8_t  kLogCols           = 4U;
-static constexpr uint16_t kLogOriginRefresh  = 64U;
-static constexpr uint32_t kLogMaxSize        = 1UL * 1024UL * 1024UL;
-static const char* const  kLogHeaders[kLogCols] = {"time", "lon", "lat", "alt"};
-
 static AimCanHardware g_canHw(node::kCanBaud, CAN1);
 static AimNetwork g_aim(&g_canHw, node::kSource);
 static SoftwareSerial g_serial(pins::kSerialRx, pins::kSerialTx);
@@ -62,13 +56,15 @@ static void hookStatus(Stream& out) {
 
 void setup(void) {
   g_serial.begin(node::kSerialBaud);
+  g_log.setFilterMask(0x0F);
   g_logger = &g_log;
   LOG_INFO("Boot %s source=%u", node::kName, static_cast<unsigned>(node::kSource));
   IWatchdog.begin(kWatchdogTimeoutUs);
   LOG_INFO("Watchdog ready");
 
   if (!g_aim.begin(aim::classBit(aim::Class::Time) |
-                   aim::classBit(aim::Class::Event))) {
+                   aim::classBit(aim::Class::Event) |
+                   aim::classBit(aim::Class::Heartbeat))) {
     LOG_ERROR("CAN init failed");
   }
 
@@ -105,7 +101,9 @@ void loop(void) {
 
   serviceCanRx();
   nodeUpdate(nowMs);
-  nodeServiceLog(nowMs, g_recorder);
+  if (!aimConsoleIsActive()) {
+    nodeServiceLog(nowMs, g_recorder);
+  }
   nodeServiceCanTx(nowMs, g_aim);
   g_aim.service(nowMs, nodeCurrentState(), nodeErrorBits());
 

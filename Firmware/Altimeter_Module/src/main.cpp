@@ -11,15 +11,8 @@
 #include <aim_console.h>
 #endif
 
-static constexpr uint32_t kWatchdogTimeoutUs  = 2000000U;
+static constexpr uint32_t kWatchdogTimeoutUs  = 8000000U; // 8 seconds
 static constexpr uint8_t  kMaxRxFramesPerLoop = 8U;
-
-static constexpr uint8_t  kLogCols           = 10U;
-static constexpr uint16_t kLogOriginRefresh  = 64U;
-static constexpr uint32_t kLogMaxSize        = 1UL * 1024UL * 1024UL;
-static const char* const  kLogHeaders[kLogCols] = {
-  "time", "pressPa", "altCm", "accX", "accY", "accZ", "gyroX", "gyroY", "gyroZ", "highgZ"
-};
 
 static AimCanHardware g_canHw(node::kCanBaud, CAN1);
 static AimNetwork g_aim(&g_canHw, node::kSource);
@@ -62,9 +55,8 @@ static void hookStatus(Stream& out) {
 void setup(void) {
   g_serial.begin(node::kSerialBaud);
   g_logger = &g_log;
+  g_log.setFilterMask(0xFF);
   LOG_INFO("Boot %s source=%u", node::kName, static_cast<unsigned>(node::kSource));
-  IWatchdog.begin(kWatchdogTimeoutUs);
-  LOG_INFO("Watchdog ready");
 
   SPI.begin();
 
@@ -100,16 +92,23 @@ void setup(void) {
 
   nodeInit();
 
+  IWatchdog.begin(kWatchdogTimeoutUs);
+  IWatchdog.reload();
+  LOG_INFO("Watchdog ready (8s)");
+
 #ifndef FLIGHT_BUILD
   g_serial.println("Console ready. d=enter debug");
 #endif
 }
 
 void loop(void) {
+  IWatchdog.reload();
   const uint32_t nowMs = millis();
   serviceCanRx();
   nodeUpdate(nowMs);
-  nodeServiceLog(nowMs, g_recorder);
+  if (!aimConsoleIsActive()) {
+    nodeServiceLog(nowMs, g_recorder);
+  }
   nodeServiceCanTx(nowMs, g_aim);
   g_aim.service(nowMs, nodeCurrentState(), nodeErrorBits());
 #ifndef FLIGHT_BUILD

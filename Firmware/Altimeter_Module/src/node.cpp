@@ -16,7 +16,7 @@
 #include <logger.h>
 #include <math.h>
 
-#include "kx134.h"
+#include <SparkFun_KX13X.h>
 
 namespace {
 // Physical Conversion Constants (Reference: ICAO Standard Atmosphere Model)
@@ -30,10 +30,6 @@ constexpr float kRadToMrad             = 1000.0f;     // rad/s to mrad/s multipl
 constexpr uint16_t kBaselineSamples   = 50U;         // Ground baseline initialization sample count
 constexpr uint32_t kI2cClockHz        = 400000U;     // Fast-Mode I2C clock speed (400 kHz)
 
-// Data Rate Timing Constants (Reference: AIM Network v0.7.0 Spec Decision D12)
-constexpr uint32_t kAltActivePeriodMs = 10U;         // 100 Hz active flight rate
-constexpr uint32_t kAltIdlePeriodMs   = 1000U;       // 1 Hz pad idle rate
-
 // Hardware Error Bitmasks
 constexpr uint16_t kErrBaroFail  = (1U << 0);
 constexpr uint16_t kErrImuFail   = (1U << 1);
@@ -44,7 +40,7 @@ static bool s_lowPower = false;
 
 static MS5611 s_baro(pins::kMs5611Addr);
 static Adafruit_MPU6050 s_imu;
-static Kx134 s_kx134(pins::kKx134Addr);
+static SparkFun_KX134 s_kx134;
 
 static bool s_baroOk  = false;
 static bool s_imuOk   = false;
@@ -57,16 +53,20 @@ static int32_t s_pressPa = 0;
 static int32_t s_tempCc  = 0;
 static int32_t s_altCm   = 0;
 
-static int32_t s_accelX  = 0;  // mm/s^2
-static int32_t s_accelY  = 0;  // mm/s^2
-static int32_t s_accelZ  = 0;  // mm/s^2
+// MPU6050
+static int32_t s_imuAccelX  = 0;  // mm/s^2
+static int32_t s_imuAccelY  = 0;  // mm/s^2
+static int32_t s_imuAccelZ  = 0;  // mm/s^2
 static int32_t s_gyroX   = 0;  // mrad/s
 static int32_t s_gyroY   = 0;  // mrad/s
 static int32_t s_gyroZ   = 0;  // mrad/s
-static int32_t s_highgZ  = 0;  // mm/s^2 (KX134)
+// KX134 
+static int32_t s_highAccelX  = 0;  // mm/s^2
+static int32_t s_highAccelY  = 0;  // mm/s^2
+static int32_t s_highAccelZ  = 0;  // mm/s^2
 
-static aim::Job s_txJob{kAltIdlePeriodMs, 0U};
-static aim::Job s_logJob{kAltIdlePeriodMs, 0U};
+static aim::Job s_txJob(1000U, 10U);    // 1 Hz idle, 100 Hz active CAN tx
+static aim::Job s_logJob(1000U, 10U);   // 1 Hz idle, 100 Hz active flight log
 
 static Adafruit_NeoPixel s_rgbLeds(1U, pins::kRgbData, NEO_GRB + NEO_KHZ800);
 
@@ -134,9 +134,13 @@ void nodeInit() {
     LOG_ERROR("MPU6050 init failed");
   }
 
-  s_kx134Ok = s_kx134.begin();
+  s_kx134Ok = s_kx134.begin(Wire, pins::kKx134Addr);
   if (s_kx134Ok) {
-    LOG_INFO("KX134 ready (64g range)");
+    s_kx134.softwareReset();
+    delay(50);
+    s_kx134.setRange(SFE_KX134_RANGE64G);
+    s_kx134.enableAccel();
+    LOG_INFO("KX134 ready (SparkFun lib, 64g range)");
   } else {
     LOG_WARN("KX134 init failed");
   }
@@ -165,32 +169,44 @@ void nodeUpdate(uint32_t nowMs) {
   if (s_imuOk) {
     sensors_event_t a, g, temp;
     s_imu.getEvent(&a, &g, &temp);
-    s_accelX = static_cast<int32_t>(a.acceleration.x * kMToMm);
-    s_accelY = static_cast<int32_t>(a.acceleration.y * kMToMm);
-    s_accelZ = static_cast<int32_t>(a.acceleration.z * kMToMm);
+    s_imuAccelX = static_cast<int32_t>(a.acceleration.x * kMToMm);
+    s_imuAccelY = static_cast<int32_t>(a.acceleration.y * kMToMm);
+    s_imuAccelZ = static_cast<int32_t>(a.acceleration.z * kMToMm);
     s_gyroX  = static_cast<int32_t>(g.gyro.x * kRadToMrad);
     s_gyroY  = static_cast<int32_t>(g.gyro.y * kRadToMrad);
     s_gyroZ  = static_cast<int32_t>(g.gyro.z * kRadToMrad);
   }
 
   if (s_kx134Ok) {
-    int32_t kxX = 0, kxY = 0, kxZ = 0;
-    if (s_kx134.readAccelMmS2(kxX, kxY, kxZ)) {
-      s_highgZ = kxZ;
+    outputData kxData;
+    if (s_kx134.getAccelData(&kxData)) {
+      s_highAccelX = static_cast<int32_t>(kxData.xData * 9806.65f);
+      s_highAccelY = static_cast<int32_t>(kxData.yData * 9806.65f);
+      s_highAccelZ = static_cast<int32_t>(kxData.zData * 9806.65f);
     }
   }
 }
 
 void nodeServiceLog(uint32_t nowMs, AimFlightRecorder& recorder) {
-  if (!recorder.isLogging()) return;
   if (!s_logJob.due(nowMs)) return;
   if (!s_baroOk) return;
 
-  // FLASH WRITING DISABLED FOR BENCH TESTING.
-  // ROADMAP (D14): AimFlightRecorder will accept an AimColumnDef array (name, type, scaleFactor)
-  // to internally handle optimal bit-packing & self-describing serial dumps across all nodes.
-  (void)nowMs;
-  (void)recorder;
+  uint32_t rowData[kLogCols] = {
+    nowMs,
+    static_cast<uint32_t>(s_pressPa),
+    AimFlightRecorder::unsignify(s_altCm),
+    AimFlightRecorder::unsignify(s_imuAccelX),
+    AimFlightRecorder::unsignify(s_imuAccelY),
+    AimFlightRecorder::unsignify(s_imuAccelZ),
+    AimFlightRecorder::unsignify(s_gyroX),
+    AimFlightRecorder::unsignify(s_gyroY),
+    AimFlightRecorder::unsignify(s_gyroZ),
+    AimFlightRecorder::unsignify(s_highAccelX),
+    AimFlightRecorder::unsignify(s_highAccelY),
+    AimFlightRecorder::unsignify(s_highAccelZ)
+  };
+
+  recorder.writeRow(rowData);
 }
 
 void nodeServiceCanTx(uint32_t nowMs, AimNetwork& aim) {
@@ -209,49 +225,22 @@ void nodeServiceCanTx(uint32_t nowMs, AimNetwork& aim) {
     aim::Msg accMsg = {};
     accMsg.cls     = aim::Class::Sensor;
     accMsg.subject = aim::subject::Acceleration;
-    const int32_t zAccel = s_kx134Ok ? s_highgZ : s_accelZ;
-    accMsg.setSensorValue(zAccel);
+    const float ax = static_cast<float>(s_kx134Ok ? s_highAccelX : s_imuAccelX);
+    const float ay = static_cast<float>(s_kx134Ok ? s_highAccelY : s_imuAccelY);
+    const float az = static_cast<float>(s_kx134Ok ? s_highAccelZ : s_imuAccelZ);
+    const int32_t magAccel = static_cast<int32_t>(sqrtf(ax * ax + ay * ay + az * az));
+    accMsg.setSensorValue(magAccel);
     (void)aim.send(accMsg);
   }
 }
 
-void nodeSetTelemetryMode(bool active, AimNetwork& aim) {
-  const uint32_t newPeriod = active ? kAltActivePeriodMs : kAltIdlePeriodMs;
-  if (s_txJob.periodMs != newPeriod) {
-    s_txJob.periodMs  = newPeriod;
-    s_logJob.periodMs = newPeriod;
-
-    aim::Msg modeEvt = {};
-    modeEvt.cls     = aim::Class::Event;
-    modeEvt.subject = aim::subject::TelemetryMode;
-    modeEvt.b[0]    = active ? 1U : 0U;
-    (void)aim.send(modeEvt);
-
-    LOG_INFO("Altimeter rate change event published (active=%d, period=%lu ms)",
-             static_cast<int>(active), newPeriod);
-  }
-}
 
 void nodeOnRx(const aim::Msg& m, uint32_t nowMs) {
   (void)nowMs;
   if (m.cls == aim::Class::Event) {
-    if (m.subject == aim::subject::LaunchDetect || m.subject == aim::subject::TelemetryMode) {
-      const bool isActive = (m.subject == aim::subject::LaunchDetect) || (m.b[0] == 1U);
-      const uint32_t newPeriod = isActive ? kAltActivePeriodMs : kAltIdlePeriodMs;
-      if (s_txJob.periodMs != newPeriod) {
-        s_txJob.periodMs  = newPeriod;
-        s_logJob.periodMs = newPeriod;
-        LOG_INFO("TelemetryMode event (subj=0x%02X active=%d): rates -> %lu ms (%lu Hz)",
-                 static_cast<unsigned>(m.subject), static_cast<int>(isActive), newPeriod, 1000UL / newPeriod);
-      }
-    } else if (m.subject == aim::subject::LowPower) {
+    if (m.subject == aim::subject::LowPower) {
       s_lowPower = (m.b[0] == 1U);
-      const uint32_t newPeriod = s_lowPower ? kAltIdlePeriodMs : kAltActivePeriodMs;
-      if (s_txJob.periodMs != newPeriod) {
-        s_txJob.periodMs  = newPeriod;
-        s_logJob.periodMs = newPeriod;
-        LOG_INFO("Altimeter low power state updated: %d (period=%lu ms)", s_lowPower, newPeriod);
-      }
+      LOG_INFO("Altimeter low power state updated: %d", s_lowPower);
     }
   }
 }
@@ -292,12 +281,12 @@ static void hookSensors(Stream& out) {
   }
 
   if (s_imuOk) {
-    out.print("accel xyz(mm/s2)=");
-    out.print(static_cast<long>(s_accelX));
+    out.print("imu accel xyz(mm/s2)=");
+    out.print(static_cast<long>(s_imuAccelX));
     out.print(",");
-    out.print(static_cast<long>(s_accelY));
+    out.print(static_cast<long>(s_imuAccelY));
     out.print(",");
-    out.println(static_cast<long>(s_accelZ));
+    out.println(static_cast<long>(s_imuAccelZ));
 
     out.print("gyro xyz(mrad/s)=");
     out.print(static_cast<long>(s_gyroX));
@@ -308,14 +297,18 @@ static void hookSensors(Stream& out) {
   }
 
   if (s_kx134Ok) {
-    out.print("highg Z(mm/s2)=");
-    out.println(static_cast<long>(s_highgZ));
+    out.print("highg accel xyz(mm/s2)=");
+    out.print(static_cast<long>(s_highAccelX));
+    out.print(",");
+    out.print(static_cast<long>(s_highAccelY));
+    out.print(",");
+    out.println(static_cast<long>(s_highAccelZ));
   }
 
   out.print("txPeriodMs=");
-  out.print(static_cast<unsigned long>(s_txJob.periodMs));
+  out.print(static_cast<unsigned long>(s_txJob.periodMs()));
   out.print(" logPeriodMs=");
-  out.print(static_cast<unsigned long>(s_logJob.periodMs));
+  out.print(static_cast<unsigned long>(s_logJob.periodMs()));
   out.print(" errorBits=0x");
   out.println(nodeErrorBits(), HEX);
 }
