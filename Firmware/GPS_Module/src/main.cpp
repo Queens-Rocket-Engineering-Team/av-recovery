@@ -11,7 +11,7 @@
 #include <aim_console.h>
 #endif
 
-static constexpr uint32_t kWatchdogTimeoutUs = 2000000U;
+static constexpr uint32_t kWatchdogTimeoutUs = 10000000U;
 static constexpr uint8_t kMaxRxFramesPerLoop = 8U;
 
 static AimCanHardware g_canHw(node::kCanBaud, CAN1);
@@ -59,8 +59,6 @@ void setup(void) {
   g_log.setFilterMask(0x0F);
   g_logger = &g_log;
   LOG_INFO("Boot %s source=%u", node::kName, static_cast<unsigned>(node::kSource));
-  IWatchdog.begin(kWatchdogTimeoutUs);
-  LOG_INFO("Watchdog ready");
 
   if (!g_aim.begin(aim::classBit(aim::Class::Time) |
                    aim::classBit(aim::Class::Event) |
@@ -91,6 +89,10 @@ void setup(void) {
 #endif
 
   nodeInit();
+
+  IWatchdog.begin(kWatchdogTimeoutUs);
+  LOG_INFO("Watchdog ready (%lus timeout)", static_cast<unsigned long>(kWatchdogTimeoutUs / 1000000U));
+
 #ifndef FLIGHT_BUILD
   g_serial.println("Console ready. d=enter debug");
 #endif

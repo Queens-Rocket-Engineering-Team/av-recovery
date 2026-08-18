@@ -65,8 +65,8 @@ static int32_t s_highAccelX  = 0;  // mm/s^2
 static int32_t s_highAccelY  = 0;  // mm/s^2
 static int32_t s_highAccelZ  = 0;  // mm/s^2
 
-static aim::Job s_txJob(1000U, 10U);    // 1 Hz idle, 100 Hz active CAN tx
-static aim::Job s_logJob(1000U, 10U);   // 1 Hz idle, 100 Hz active flight log
+static aim::Job s_txJob(10U);   // 100 Hz CAN tx (loop caps ~55 Hz: 18 ms baro read)
+static aim::Job s_logJob(10U);  // 100 Hz flight log
 
 static Adafruit_NeoPixel s_rgbLeds(1U, pins::kRgbData, NEO_GRB + NEO_KHZ800);
 
@@ -306,9 +306,9 @@ static void hookSensors(Stream& out) {
   }
 
   out.print("txPeriodMs=");
-  out.print(static_cast<unsigned long>(s_txJob.periodMs()));
+  out.print(static_cast<unsigned long>(s_txJob.periodMs));
   out.print(" logPeriodMs=");
-  out.print(static_cast<unsigned long>(s_logJob.periodMs()));
+  out.print(static_cast<unsigned long>(s_logJob.periodMs));
   out.print(" errorBits=0x");
   out.println(nodeErrorBits(), HEX);
 }

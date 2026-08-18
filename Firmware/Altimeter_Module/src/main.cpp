@@ -11,7 +11,7 @@
 #include <aim_console.h>
 #endif
 
-static constexpr uint32_t kWatchdogTimeoutUs  = 8000000U; // 8 seconds
+static constexpr uint32_t kWatchdogTimeoutUs  = 10000000U; // 10 seconds timeout
 static constexpr uint8_t  kMaxRxFramesPerLoop = 8U;
 
 static AimCanHardware g_canHw(node::kCanBaud, CAN1);
@@ -94,7 +94,7 @@ void setup(void) {
 
   IWatchdog.begin(kWatchdogTimeoutUs);
   IWatchdog.reload();
-  LOG_INFO("Watchdog ready (8s)");
+  LOG_INFO("Watchdog ready (%lus timeout)", static_cast<unsigned long>(kWatchdogTimeoutUs / 1000000U));
 
 #ifndef FLIGHT_BUILD
   g_serial.println("Console ready. d=enter debug");

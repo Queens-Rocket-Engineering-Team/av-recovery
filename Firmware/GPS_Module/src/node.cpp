@@ -33,8 +33,8 @@ static bool s_loggedNoDataWarn = false;
 static bool s_loggedNoLocWarn = false;
 
 static aim::Job s_i2cErrorLogJob(5000U);     // 0.2 Hz error log rate
-static aim::Job s_coordTxJob(1000U, 100U);    // 1 Hz idle, 10 Hz active CAN tx
-static aim::Job s_flashLogJob(1000U, 100U);   // 1 Hz idle, 10 Hz active flight log
+static aim::Job s_coordTxJob(100U);  // 10 Hz CAN tx
+static aim::Job s_flashLogJob(100U); // 10 Hz flight log
 static aim::Job s_satTxJob(5000U);           // 0.2 Hz satellite count tx
 
 static Adafruit_NeoPixel s_rgbLeds(1U, pins::kRgbData, NEO_GRB + NEO_KHZ800);
@@ -293,11 +293,7 @@ void nodeServiceCanTx(uint32_t nowMs, AimNetwork& aim) {
 void nodeOnRx(const aim::Msg& m, uint32_t nowMs) {
   (void)nowMs;
   if (m.cls == aim::Class::Event) {
-    if (m.subject == aim::subject::LaunchDetect || m.subject == aim::subject::TelemetryMode) {
-      const bool isActive = (m.subject == aim::subject::LaunchDetect) || (m.b[0] == 1U);
-      LOG_INFO("TelemetryMode event (subj=0x%02X active=%d) received",
-               static_cast<unsigned>(m.subject), static_cast<int>(isActive));
-    } else if (m.subject == aim::subject::LowPower) {
+    if (m.subject == aim::subject::LowPower) {
       s_lowPower = (m.b[0] == 1U);
       LOG_INFO("GPS low power state updated: %d", s_lowPower);
     }
@@ -343,9 +339,9 @@ static void hookGpsSnapshot(Stream& out) {
   out.println(static_cast<long>(s_altMeters));
 
   out.print("txPeriodMs=");
-  out.println(static_cast<unsigned long>(s_coordTxJob.periodMs()));
+  out.println(static_cast<unsigned long>(s_coordTxJob.periodMs));
   out.print("logPeriodMs=");
-  out.println(static_cast<unsigned long>(s_flashLogJob.periodMs()));
+  out.println(static_cast<unsigned long>(s_flashLogJob.periodMs));
 }
 
 static void hookGpsParserStats(Stream& out) {
