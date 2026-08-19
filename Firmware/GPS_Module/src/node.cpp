@@ -216,7 +216,7 @@ void nodeUpdate(uint32_t nowMs) {
   } else {
     if (!s_hasValidTime) {
       s_hasValidTime = true;
-      LOG_INFO("GPS time lock acquired");
+      LOG_DEBUG("GPS time lock acquired");
     }
     if (s_parser.time.isUpdated()) {
       if (s_lastFixSentenceMs > 0U) {
@@ -295,7 +295,7 @@ void nodeOnRx(const aim::Msg& m, uint32_t nowMs) {
   if (m.cls == aim::Class::Event) {
     if (m.subject == aim::subject::LowPower) {
       s_lowPower = (m.b[0] == 1U);
-      LOG_INFO("GPS low power state updated: %d", s_lowPower);
+      LOG_DEBUG("GPS low power state updated: %d", s_lowPower);
     }
   }
 }

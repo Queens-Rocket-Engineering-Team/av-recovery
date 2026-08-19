@@ -240,7 +240,7 @@ void nodeOnRx(const aim::Msg& m, uint32_t nowMs) {
   if (m.cls == aim::Class::Event) {
     if (m.subject == aim::subject::LowPower) {
       s_lowPower = (m.b[0] == 1U);
-      LOG_INFO("Altimeter low power state updated: %d", s_lowPower);
+      LOG_DEBUG("Altimeter low power state updated: %d", s_lowPower);
     }
   }
 }
