@@ -56,7 +56,7 @@ static void hookStatus(Stream& out) {
 
 void setup(void) {
   g_serial.begin(node::kSerialBaud);
-  g_log.setFilterMask(0x0F);
+  g_log.setFilterMask(static_cast<uint8_t>(LogLevel::INFO));  // INFO only
   g_logger = &g_log;
   LOG_INFO("Boot %s source=%u", node::kName, static_cast<unsigned>(node::kSource));
 
